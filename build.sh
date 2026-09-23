@@ -900,26 +900,6 @@ next_step
 if should_run; then
  
     cd "$TOOLCHAIN/build"
-    rm -rf ncurses
-    mkdir ncurses
-    cd ncurses
-
-    "$NCURSES_SRC/configure" \
-        --build="$BUILD" \
-        --host="$TARGET" \
-        --prefix=/usr \
-        --libdir=/usr/lib64 \
-        --with-shared \
-        --without-debug \
-        --without-ada \
-        --with-build-cc="$HOSTCC" \
-        --enable-pc-files \
-        --with-termlib \
-        --disable-stripping
-
-    make -j"$(nproc)"
-    make DESTDIR="$ROOTFS" install
-    cd "$TOOLCHAIN/build"
     rm -rf ncurses-wide
     mkdir ncurses-wide
     cd ncurses-wide
@@ -1030,6 +1010,9 @@ EOF2
 	    include/fileutils.h
     # util-linux is last because it can use both ncurses and PAM.
     build_autotools_package "util-linux" "$UTIL_LINUX_SRC" \
+        --libdir=/usr/lib64 \
+        --bindir=/usr/bin \
+        --sbindir=/usr/sbin \
         --enable-shared \
         --enable-libmount \
         --enable-libblkid \
@@ -1295,6 +1278,54 @@ EOF
     cat > "$ROOTFS/etc/profile" <<'EOF'
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 export PS1='\[\e[1;35m\]nixie\[\e[0m\]@\[\e[1;36m\]\h\[\e[0m\]:\[\e[1;35m\]\w\[\e[0m\]\$ '
+# ls / dircolors
+if command -v dircolors >/dev/null 2>&1; then
+    eval "$(dircolors -b)"
+fi
+
+alias ls='ls --color=auto'
+alias ll='ls -lh --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+
+# grep
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+
+# diff
+if command -v diff >/dev/null 2>&1; then
+    alias diff='diff --color=auto'
+fi
+
+# iproute2
+if command -v ip >/dev/null 2>&1; then
+    alias ip='ip --color=auto'
+fi
+
+# dmesg
+if command -v dmesg >/dev/null 2>&1; then
+    alias dmesg='dmesg --color=auto'
+fi
+
+# journalctl
+if command -v journalctl >/dev/null 2>&1; then
+    alias journalctl='journalctl --color=auto'
+fi
+
+# systemd
+export SYSTEMD_COLORS=1
+
+# git
+if command -v git >/dev/null 2>&1; then
+    git config --global color.ui auto 2>/dev/null || true
+fi
+
+# gcc diagnostic colors
+export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+
+# terminal color capability
+export COLORTERM=truecolor
 EOF
 
     # chroot does not start a login shell, so /etc/profile is not sourced
