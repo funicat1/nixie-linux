@@ -2,3 +2,5 @@ rootfs
 toolchain
 sources
 build
+nixie-rootfs.img
+.ccache

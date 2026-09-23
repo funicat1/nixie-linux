@@ -4,15 +4,27 @@
 echo "==> nixie linux iso builder"
 
 sysroot=$(pwd)
+if [ ! -e "linux-config" ]; then
+    cd ..
+    sysroot=$(pwd)
+    if [ ! -e "linux-config" ]; then
+        echo "linux-config not found."
+        exit 1
+    fi
+fi
+
 mkdir -p "$sysroot/build/linux"
 mkdir -p "$sysroot/build/iso"
 
-git clone --depth 1 git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+if [ -d "$sysroot/toolchain" ]; then
+	cd "$sysroot"/toolchain/src/linux*
+else
+	echo "toolchain doesnt exist! build nixie linux first!"
+	exit 1
+fi
 
-cd "$sysroot/linux"
-
-#echo "==> cleaning linux source tree"
-#make mrproper
+echo "==> cleaning linux source tree"
+make mrproper
 
 cp "$sysroot/linux-config" "$sysroot/build/linux/.config"
 

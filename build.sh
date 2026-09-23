@@ -20,6 +20,7 @@ COREUTILS_VER="9.11"
 LIBCAP_VER="2.78"
 BASH_VER="5.3"
 SYSTEMD_VER="261.3"
+DBUS_VER="1.16.2"
 LESS_VER="704"
 WHICH_VER="2.25"
 FILE_VER="5.45"
@@ -29,11 +30,13 @@ GAWK_VER="5.4.0"
 TAR_VER="1.35"
 GZIP_VER="1.14"
 XZ_VER="5.8.3"
+SHADOW_VER="4.20.2"
 FINDUTILS_VER="4.11.0"
 NCURSES_VER="6.6"
 PAM_VER="1.7.2"
 UTIL_LINUX_VER="2.42.3"
 LIBXCRYPT_VER="4.5.2"
+DBUS_SRC="$TOOLCHAIN/src/dbus-${DBUS_VER}"
 
 TARGET="x86_64-nixie-linux-gnu"
 
@@ -75,6 +78,8 @@ steps:
   bash
   libcap
   systemd-deps
+  shadow
+  dbus
   systemd
   rootfs
   sanity
@@ -145,6 +150,8 @@ VALID_STEPS=(
     bash
     libcap
     systemd-deps
+    shadow
+    dbus
     systemd
     rootfs
     sanity
@@ -423,6 +430,14 @@ if should_run || [ $DOWNLOAD -ge 1 ]; then
     download \
         "https://github.com/besser82/libxcrypt/releases/download/v${LIBXCRYPT_VER}/libxcrypt-${LIBXCRYPT_VER}.tar.xz" \
         "libxcrypt-${LIBXCRYPT_VER}.tar.xz"
+        
+    download \
+        "https://dbus.freedesktop.org/releases/dbus/dbus-${DBUS_VER}.tar.xz" \
+        "dbus-${DBUS_VER}.tar.xz"
+        
+    download \
+        "https://github.com/shadow-maint/shadow/releases/download/${SHADOW_VER}/shadow-${SHADOW_VER}.tar.xz" \
+        "shadow-${SHADOW_VER}.tar.xz"
 fi
 
 next_step
@@ -501,6 +516,12 @@ if should_run || [ $DOWNLOAD -ge 1 ]; then
    
     log "extract $SOURCES/libxcrypt-${LIBXCRYPT_VER}.tar.xz"
     tar -xf "$SOURCES/libxcrypt-${LIBXCRYPT_VER}.tar.xz"
+    
+    log "extract $SOURCES/dbus-${DBUS_VER}.tar.xz"
+    tar -xf "$SOURCES/dbus-${DBUS_VER}.tar.xz"
+    
+    log "extract $SOURCES/shadow-${SHADOW_VER}.tar.xz"
+    tar -xf "$SOURCES/shadow-${SHADOW_VER}.tar.xz"
 fi
 
 SYSTEMD_SRC="$TOOLCHAIN/src/systemd-${SYSTEMD_VER}"
@@ -519,6 +540,7 @@ NCURSES_SRC="$TOOLCHAIN/src/ncurses-${NCURSES_VER}"
 PAM_SRC="$TOOLCHAIN/src/Linux-PAM-${PAM_VER}"
 UTIL_LINUX_SRC="$TOOLCHAIN/src/util-linux-${UTIL_LINUX_VER}"
 LIBXCRYPT_SRC="$TOOLCHAIN/src/libxcrypt-${LIBXCRYPT_VER}"
+SHADOW_SRC="$TOOLCHAIN/src/shadow-${SHADOW_VER}"
 
 next_step
 
@@ -898,7 +920,11 @@ next_step
 # ============================================================
 
 if should_run; then
- 
+    cat > "$ROOTFS/etc/ld.so.conf" <<'EOF'
+/usr/lib
+/usr/lib64
+EOF
+
     cd "$TOOLCHAIN/build"
     rm -rf ncurses-wide
     mkdir ncurses-wide
@@ -1027,6 +1053,120 @@ EOF2
         --without-zstd \
         --without-bzip2
 fi
+
+next_step
+
+# ============================================================
+# shadow
+# ============================================================
+
+if should_run; then
+    log "building shadow ${SHADOW_VER}..."
+
+    cd "$TOOLCHAIN/build"
+
+    rm -rf shadow
+    mkdir shadow
+    cd shadow
+
+    "$SHADOW_SRC/configure" \
+        --build="$BUILD" \
+        --host="$TARGET" \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --libdir=/usr/lib64 \
+        --sbindir=/usr/sbin \
+        --enable-shared \
+        --with-libpam \
+        --without-selinux \
+        --without-audit \
+        --without-tcb \
+        --disable-man \
+        --without-libbsd \
+        --disable-nls \
+        --disable-account-tools-setuid
+
+    make -j"$(nproc)"
+
+    make DESTDIR="$ROOTFS" install
+
+    log "shadow installed into target rootfs."
+fi
+
+next_step
+
+# ============================================================
+# dbus
+# ============================================================
+
+if should_run; then
+    log "building dbus ${DBUS_VER}..."
+
+    cd "$TOOLCHAIN/build"
+
+    rm -rf dbus
+
+    cat > "$TOOLCHAIN/build/dbus-cross.txt" <<EOF2
+[binaries]
+c = ['ccache', '${TARGET}-gcc']
+cpp = ['ccache', '${TARGET}-g++']
+ar = '${TARGET}-ar'
+strip = '${TARGET}-strip'
+pkg-config = '${TARGET}-pkg-config'
+
+[properties]
+sys_root = '$ROOTFS'
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF2
+
+    meson setup dbus \
+        "$DBUS_SRC" \
+        --cross-file "$TOOLCHAIN/build/dbus-cross.txt" \
+        --prefix=/usr \
+        --libdir=/usr/lib64 \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --buildtype=release \
+        -Dmessage_bus=true \
+        -Dsystemd=enabled \
+        -Duser_session=true \
+        -Dtraditional_activation=true \
+        -Dtools=true \
+        -Dmodular_tests=disabled \
+        -Dinstalled_tests=false \
+        -Ddoxygen_docs=disabled \
+        -Dducktype_docs=disabled \
+        -Dxml_docs=disabled \
+        -Dqt_help=disabled \
+        -Dx11_autolaunch=disabled \
+        -Dselinux=disabled \
+        -Dapparmor=disabled \
+        -Dlibaudit=disabled \
+        -Dvalgrind=disabled \
+        -Dsystemd_system_unitdir=/usr/lib/systemd/system \
+        -Dsystemd_user_unitdir=/usr/lib/systemd/user \
+        -Druntime_dir=/run \
+        -Dsystem_socket=/run/dbus/system_bus_socket \
+        -Ddbus_user=messagebus
+
+    meson compile \
+        -C dbus \
+        -j"$(nproc)"
+
+    DESTDIR="$ROOTFS" \
+        meson install \
+        -C dbus
+
+    log "dbus installed into target rootfs."
+fi
+
+next_step
 
 # ============================================================
 # systemd
@@ -1264,11 +1404,20 @@ PRETTY_NAME="Nixie Linux"
 ID=nixie
 ID_LIKE=linux
 VERSION_ID="rolling"
-HOME_URL="https://example.com/"
 EOF
 
     cat > "$ROOTFS/etc/hostname" <<'EOF'
 nixie
+EOF
+
+    cat > "$ROOTFS/etc/motd" <<'EOF'
+       _      _         _ _                  
+ ____ (_)_  _(_) ___   | (_)_ __  _   ___  __
+/  _ \| \ \/ / |/ _ \  | | | '_ \| | | \ \/ /
+| | | | |>  <| |  __/  | | | | | | |_| |>  < 
+|_| |_|_/_/\_\_|\___|  |_|_|_| |_|\__,_/_/\_\
+===============================================
+Welcome to nixie linux! (rolling)
 EOF
 
     cat > "$ROOTFS/etc/issue" <<'EOF'
@@ -1277,7 +1426,7 @@ EOF
 
     cat > "$ROOTFS/etc/profile" <<'EOF'
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
-export PS1='\[\e[1;35m\]nixie\[\e[0m\]@\[\e[1;36m\]\h\[\e[0m\]:\[\e[1;35m\]\w\[\e[0m\]\$ '
+export PS1='\[\e[95m\]\u\[\e[0m\]@\[\e[36;1m\]\h\[\e[0m\]:\[\e[35;1m\]\w\[\e[0m\]\$ '
 # ls / dircolors
 if command -v dircolors >/dev/null 2>&1; then
     eval "$(dircolors -b)"
@@ -1308,11 +1457,6 @@ if command -v dmesg >/dev/null 2>&1; then
     alias dmesg='dmesg --color=auto'
 fi
 
-# journalctl
-if command -v journalctl >/dev/null 2>&1; then
-    alias journalctl='journalctl --color=auto'
-fi
-
 # systemd
 export SYSTEMD_COLORS=1
 
@@ -1327,7 +1471,53 @@ export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quo
 # terminal color capability
 export COLORTERM=truecolor
 EOF
+    log "Setting up login.."
+    mkdir -p rootfs/etc/systemd/system/getty.target.wants
 
+    ln -sfn \
+        rootfs/usr/lib/systemd/system/getty@.service \
+        rootfs/etc/systemd/system/getty.target.wants/getty@tty1.service
+    
+    cat > "$ROOTFS/etc/pam.d/login" <<'EOF'
+auth       required   pam_unix.so
+account    required   pam_unix.so
+session    required   pam_unix.so
+session    optional   pam_motd.so
+EOF
+
+    cat > "$ROOTFS/etc/passwd" <<'EOF'
+root:x:0:0:root:/root:/bin/bash
+EOF
+
+    cat > "$ROOTFS/etc/group" <<'EOF'
+root:x:0:
+EOF
+
+    mkdir -p "$ROOTFS/root"
+    chmod 755 "$ROOTFS/root"
+    hash="$(openssl passwd -6 root)"
+    last_change=$(( $(date +%s) / 86400 ))
+
+    cat > "$ROOTFS/etc/shadow" <<EOF
+root:$hash:$last_change:0:99999:7:::
+EOF
+
+    chmod 600 "$ROOTFS/etc/shadow"
+    
+    cat > "$ROOTFS/etc/login.defs" <<'EOF'
+FAIL_DELAY 3
+LOG_UNKFAIL_ENAB no
+LOG_OK_LOGINS no
+LASTLOG_ENAB yes
+
+MAIL_CHECK_ENAB no
+
+ENV_SUPATH PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV_PATH    PATH=/usr/local/bin:/usr/bin:/bin
+
+TTYPERM 0600
+EOF
+    log "root is the default password for user root."
     # chroot does not start a login shell, so /etc/profile is not sourced
     # automatically. For an interactive shell, use: chroot "$ROOTFS" /bin/bash -il
 fi
@@ -1370,6 +1560,8 @@ if should_run; then
 fi
 
 next_step
+
+
 
 # ============================================================
 # cleanup environment
