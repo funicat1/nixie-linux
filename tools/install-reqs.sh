@@ -1,1 +1,1 @@
-sudo apt install curl tar make gcc g++ binutils bison flex ccache meson ninja-build gperf nasm xorriso llvm mtools python3-jinja2 python3 libdw-dev -y
+sudo apt install curl tar make gcc g++ binutils bison flex ccache meson ninja-build gperf nasm xorriso llvm mtools python3-jinja2 python3 libdw-dev autopoint gettext autoconf automake libtool xsltproc libxslt1-dev libelf-dev build-essential -y

@@ -4,3 +4,4 @@ sources
 build
 nixie-rootfs.img
 .ccache
+nixie-linux.iso

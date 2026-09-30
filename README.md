@@ -5,6 +5,9 @@ its real
 ## build
 1. `$ bash tools/install-reqs.sh`
 2. `$ sudo bash build.sh`
-3. thats it. you have to wait a millenial
+3. `$ sudo tools/00-isobuild.sh`
 
-right only, only a rootfs will be built. iso builder script is in progress
+the iso builder is complete :D
+builds a file called `nixie-linux.iso`
+Note: couldnt get autologin workin in time so the login is `root` with password `1`
+
