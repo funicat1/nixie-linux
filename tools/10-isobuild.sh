@@ -74,6 +74,7 @@ if [ -z "$linux_src" ]; then
     exit 1
 fi
 
+
 # clean iso staging area
 rm -rf "$sysroot/build/iso"
 
@@ -98,10 +99,24 @@ if [ ! -e "$sysroot/build/linux/arch/x86/boot/bzImage" ]; then
 
     log "building linux"
     make O="$sysroot/build/linux" olddefconfig
-    make O="$sysroot/build/linux" bzImage -j"$(nproc)"
+    make O="$sysroot/build/linux" bzImage modules -j"$(nproc)"
 else
     log "$sysroot/build/linux/arch/x86/boot/bzImage already exists. not building the kernel again"
 fi
+if [ ! -e "$sysroot/build/linux/modules.order" ]; then
+    cd "$linux_src"
+    make mrproper
+
+    log "installing linux config"
+    cp "$sysroot/linux-config" \
+        "$sysroot/build/linux/.config"
+
+    log "building kernel modules"
+    make O="$sysroot/build/linux" modules -j"$(nproc)"
+fi
+log "installing kernel modules"
+cd "$linux_src"
+make O="$sysroot/build/linux" modules_install INSTALL_MOD_PATH="$sysroot/rootfs/"
 
 # ==============
 # limine

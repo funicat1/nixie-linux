@@ -2129,7 +2129,7 @@ export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quo
 # terminal color capability
 export COLORTERM=truecolor
 EOF
-    log "Setting up login.."
+    log "Setting up autologin.."
     mkdir -p rootfs/etc/systemd/system/getty.target.wants
 
     ln -sfn \
@@ -2153,7 +2153,7 @@ EOF
 
     mkdir -p "$ROOTFS/root"
     chmod 755 "$ROOTFS/root"
-    hash="$(openssl passwd -6 1)"
+    hash="$(openssl passwd -6 root)"
     last_change=$(( $(date +%s) / 86400 ))
 
     cat > "$ROOTFS/etc/shadow" <<EOF
@@ -2161,6 +2161,14 @@ root:$hash:$last_change:0:99999:7:::
 EOF
 
     chmod 600 "$ROOTFS/etc/shadow"
+    
+    mkdir -p "$ROOTFS/etc/systemd/system/getty@tty1.service.d"
+
+cat > "$ROOTFS/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/usr/sbin/agetty --autologin root --noclear %I $TERM
+EOF
     
     cat > "$ROOTFS/etc/login.defs" <<'EOF'
 FAIL_DELAY 3
@@ -2175,7 +2183,7 @@ ENV_PATH    PATH=/usr/local/bin:/usr/bin:/bin
 
 TTYPERM 0600
 EOF
-    log "1 is the default password for user root."
+    log "good boy"
     # chroot does not start a login shell, so /etc/profile is not sourced
     # automatically. For an interactive shell, use: chroot "$ROOTFS" /bin/bash -il
 fi
@@ -2316,7 +2324,7 @@ sudo chown -R "$username:$username" $SOURCES
 
 log "Running ldconfig..."
 ldconfig -r "$ROOTFS"
-ln -s "$ROOTFS/sbin/ldconfig" "$ROOTFS/usr/sbin/ldconfig" 
+cp "$ROOTFS/sbin/ldconfig" "$ROOTFS/usr/sbin/ldconfig" 
 
 echo
 printf '%b=======================%b\n' \
