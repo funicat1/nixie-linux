@@ -52,6 +52,7 @@ READLINE_VER="8.3"
 NEWT_VER="0.52.24"
 SLANG_VER="2.3.3"
 POPT_VER="1.19"
+KMOD_VER="34.2"
 
 TARGET="x86_64-nixie-linux-gnu"
 
@@ -94,8 +95,8 @@ steps:
   libcap
   systemd-deps
   shadow
-  dbus
   openssl
+  dbus
   gnutls
   systemd
   networkmanager-deps
@@ -541,6 +542,10 @@ if should_run || [ $DOWNLOAD -ge 1 ]; then
     download \
         "https://curl.se/ca/cacert.pem" \
         "ca-certificates.crt"
+        
+    download \
+        "https://cdn.kernel.org/pub/linux/utils/kernel/kmod/kmod-${KMOD_VER}.tar.xz" \
+        "kmod-${KMOD_VER}.tar.xz"
 fi
 
 next_step
@@ -682,6 +687,9 @@ if should_run || [ $DOWNLOAD -ge 1 ]; then
 
     log "extract $SOURCES/popt-${POPT_VER}.tar.gz"
     tar -xf "$SOURCES/popt-${POPT_VER}.tar.gz"
+    
+    log "extract $SOURCES/kmod-${KMOD_VER}.tar.xz"
+    tar -xf "$SOURCES/kmod-${KMOD_VER}.tar.xz"
 fi
 
 SYSTEMD_SRC="$TOOLCHAIN/src/systemd-${SYSTEMD_VER}"
@@ -721,6 +729,7 @@ READLINE_SRC="$TOOLCHAIN/src/readline-${READLINE_VER}"
 NEWT_SRC="$TOOLCHAIN/src/newt-${NEWT_VER}"
 SLANG_SRC="$TOOLCHAIN/src/slang-${SLANG_VER}"
 POPT_SRC="$TOOLCHAIN/src/popt-${POPT_VER}"
+KMOD_SRC="$TOOLCHAIN/src/kmod-${KMOD_VER}"
 
 next_step
 
@@ -1277,6 +1286,34 @@ fi
 next_step
 
 # ============================================================
+# openssl
+# ============================================================
+
+if should_run; then
+    log "building openssl ${OPENSSL_VER}..."
+    cd "$TOOLCHAIN/build"
+    rm -rf openssl
+    cp -r "$OPENSSL_SRC" openssl
+    cd openssl
+
+    CC="ccache ${TARGET}-gcc" \
+    CXX="ccache ${TARGET}-g++" \
+    AR="${TARGET}-ar" \
+    RANLIB="${TARGET}-ranlib" \
+    ./Configure linux-x86_64 \
+        --prefix=/usr \
+        --openssldir=/etc/ssl \
+        --libdir=lib64 \
+        shared \
+        no-tests
+
+    make -j"$(nproc)"
+    make DESTDIR="$ROOTFS" install_sw install_ssldirs
+fi
+
+next_step
+
+# ============================================================
 # dbus
 # ============================================================
 
@@ -1350,34 +1387,6 @@ fi
 next_step
 
 # ============================================================
-# openssl
-# ============================================================
-
-if should_run; then
-    log "building openssl ${OPENSSL_VER}..."
-    cd "$TOOLCHAIN/build"
-    rm -rf openssl
-    cp -r "$OPENSSL_SRC" openssl
-    cd openssl
-
-    CC="ccache ${TARGET}-gcc" \
-    CXX="ccache ${TARGET}-g++" \
-    AR="${TARGET}-ar" \
-    RANLIB="${TARGET}-ranlib" \
-    ./Configure linux-x86_64 \
-        --prefix=/usr \
-        --openssldir=/etc/ssl \
-        --libdir=lib64 \
-        shared \
-        no-tests
-
-    make -j"$(nproc)"
-    make DESTDIR="$ROOTFS" install_sw install_ssldirs
-fi
-
-next_step
-
-# ============================================================
 # gmp, nettle & gnutls
 # ============================================================
 
@@ -1395,8 +1404,7 @@ if should_run; then
     build_autotools_package "nettle" "$NETTLE_SRC" \
         --libdir=/usr/lib64 \
         --enable-public-key \
-        --disable-documentation \
-        --disable-openssl
+        --disable-documentation
 
     log "building gnutls ${GNUTLS_VER}..."
     build_autotools_package "gnutls" "$GNUTLS_SRC" \
@@ -1488,7 +1496,7 @@ EOF2
         -Dlibmount=enabled \
         -Dblkid=enabled \
         -Dfdisk=disabled \
-        -Dkmod=disabled \
+        -Dkmod=enabled \
         -Dpam=enabled \
         -Dacl=disabled \
         -Daudit=disabled \
@@ -2195,9 +2203,41 @@ next_step
 
 if should_run; then
     log "building post-sanity base packages..."
+
+    build_autotools_package "xz" "$XZ_SRC" \
+        --disable-doc \
+        --disable-scripts
     
     cp -r "$FASTFETCH_SRC"/* "$ROOTFS/"
     
+    log "building kmod..."
+
+    cd "$TOOLCHAIN/build"
+
+    rm -rf kmod
+    mkdir kmod
+    cd kmod
+
+    "$KMOD_SRC/configure" \
+        --build="$BUILD" \
+        --host="$TARGET" \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --libdir=/usr/lib \
+        --with-xz=yes \
+        --with-zstd=no \
+        --with-zlib=no \
+        --with-openssl=yes
+
+    make -j"$(nproc)"
+    make DESTDIR="$ROOTFS" install
+    
+    
+    mkdir -p "$ROOTFS/etc/systemd/system/sysinit.target.wants"
+
+ln -sf \
+    /usr/lib/systemd/system/systemd-modules-load.service \
+    "$ROOTFS/etc/systemd/system/sysinit.target.wants/systemd-modules-load.service"
     
     log "building htop..."
     cd "$HTOP_SRC"
@@ -2274,17 +2314,15 @@ if should_run; then
 
     build_autotools_package "gawk" "$GAWK_SRC" \
         --without-mpfr
+        
+    build_autotools_package "gzip" "$GZIP_SRC"
 
     build_autotools_package "tar" "$TAR_SRC"
 
-    build_autotools_package "gzip" "$GZIP_SRC"
-
-    build_autotools_package "xz" "$XZ_SRC" \
-        --disable-doc \
-        --disable-scripts
-
     build_autotools_package "findutils" "$FINDUTILS_SRC" \
         --disable-locate
+        
+
 fi
 
 next_step
@@ -2325,6 +2363,11 @@ sudo chown -R "$username:$username" $SOURCES
 log "Running ldconfig..."
 ldconfig -r "$ROOTFS"
 cp "$ROOTFS/sbin/ldconfig" "$ROOTFS/usr/sbin/ldconfig" 
+
+log "Running depmod..."
+"$ROOTFS/usr/sbin/depmod" \
+    -b "$ROOTFS" \
+    "$LINUX_VER"
 
 echo
 printf '%b=======================%b\n' \
