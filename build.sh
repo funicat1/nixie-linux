@@ -1930,7 +1930,7 @@ if should_run; then
     cp -a "$FASTFETCH_SRC"/* "$ROOTFS/"
     
     log "copying nxbuild..."
-    cp "$SOURCES/nxbuild" "$ROOTFS/"
+    cp "$SOURCES/nxbuild" "$ROOTFS/usr/bin"
     chmod +x "$ROOTFS/nxbuild"
 
     build_autotools_package "xz" "$XZ_SRC" --disable-scripts
