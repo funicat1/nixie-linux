@@ -53,17 +53,43 @@ NEWT_VER="0.52.24"
 SLANG_VER="2.3.3"
 POPT_VER="1.19"
 KMOD_VER="34.2"
+GDBM_VER="1.26"
+PERL_VER="5.44.0"
+
+# new build tools & man doc dependencies
+M4_VER="1.4.19"
+AUTOCONF_VER="2.72"
+AUTOMAKE_VER="1.17"
+LIBTOOL_VER="2.5.3"
+MAKE_VER="4.4.1"
+BISON_VER="3.8.2"
+FLEX_VER="2.6.4"
+PKGCONFIG_VER="0.29.2"
+NINJA_VER="1.12.1"
+MESON_VER="1.5.1"
+TEXINFO_VER="7.3"
+LIBPIPELINE_VER="1.5.8"
+GROFF_VER="1.23.0"
+MAN_DB_VER="2.13.0"
+MAN_PAGES_VER="6.9"
 
 TARGET="x86_64-nixie-linux-gnu"
 
+NIXIE_LOG="$(pwd)/nixie.log"
+
 # default: clean everything
 CLEAN=1
+
+# default: https://en.wikipedia.org/wiki/Verbose_mode
+SILENT=0
 
 # default: dont download (if skipping)
 DOWNLOAD=0
 
 # default: build from the beginning
 SKIP_TO=""
+
+alias make="make -s "
 
 # ============================================================
 # argument parsing
@@ -79,6 +105,7 @@ options:
   --skip-to <step>        skip directly to a build step
   -h, --help              show this help
   --download              still download + extract even if skip is on. really recommended for me
+  --quieter               decreases amount of logs dumped into terminal. logs are saved to "$NIXIE_LOG"
 
 steps:
   download
@@ -94,16 +121,18 @@ steps:
   bash
   libcap
   systemd-deps
-  shadow
   openssl
-  dbus
   gnutls
   systemd
+  dbus
+  shadow
   networkmanager-deps
   networkmanager
   rootfs
   sanity
   packages
+  native-toolchain
+  build-tools
 
 examples:
   $0
@@ -111,7 +140,7 @@ examples:
   $0 --no-clean --skip-to systemd
   $0 --no-clean --skip-to rootfs
   $0 --no-clean --skip-to gcc
-  $0 --no-clean --skip-to packages --download
+  $0 --no-clean --skip-to build-tools --download
 EOF2
 }
 
@@ -129,6 +158,11 @@ while [ "$#" -gt 0 ]; do
         
         --download)
             DOWNLOAD=1
+            shift
+            ;;
+        
+        --quieter)
+            export SILENT=1
             shift
             ;;
 
@@ -170,17 +204,18 @@ VALID_STEPS=(
     bash
     libcap
     systemd-deps
-    shadow
-    dbus
     openssl
     gnutls
     systemd
+    dbus
+    shadow
     networkmanager-deps
     networkmanager
     rootfs
     sanity
     packages
-    flavor
+    native-toolchain
+    build-tools
 )
 
 START_INDEX=0
@@ -230,6 +265,10 @@ log() {
         "$LOG_TEXT_COLOR" \
         "$*" \
         "$RESET"
+    if [ "$SILENT" -eq 1 ]; then
+        printf '==> %s\n' \
+        "$*" >> ""$NIXIE_LOG""
+    fi
 }
 
 log_error() {
@@ -244,6 +283,13 @@ log_error() {
 # ============================================================
 
 log "nixie linux bootstrap"
+
+log "build machine specifications:"
+log "cpu:      $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+log "os:       $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}")"
+log "hostname: $(hostname)"
+log "memory:   $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
+log "storage:  $(df -h / | awk 'NR==2 {printf "%s total, %s available", $2, $4}')"
 
 if [ "$EUID" != "0" ]; then
     log_error "This script should be ran as root."
@@ -262,15 +308,23 @@ else
     log "starting from step: download"
 fi
 
+if [ "$SILENT" -eq 0 ]; then
+    log "quieter: no"
+    
+else
+    log "quieter: yes"
+    export MAKEFLAGS="-s V=0 QUIET=1 VERBOSE=0"
+fi
+
 echo
 
 # ============================================================
 # host prerequisites
 # ============================================================
 
-for tool in ccache meson ninja gcc g++ make curl pkg-config gperf python3; do
+for tool in ccache meson ninja gcc g++ make curl pkg-config gperf python3 bison flex makeinfo; do
     if ! command -v "$tool" >/dev/null 2>&1; then
-        log_error "$tool is required."
+        log_error "$tool is required on host."
         echo "install it with your distro's package manager first."
         exit 1
     fi
@@ -339,27 +393,62 @@ download() {
 }
 
 build_autotools_package() {
-        local name="$1"
-        local src="$2"
-        shift 2
+    local name="$1"
+    local src="$2"
+    shift 2
 
-        log "building ${name}..."
-        cd "$TOOLCHAIN/build"
-        rm -rf "$name"
-        mkdir "$name"
-        cd "$name"
+    log "building ${name}..."
 
+    # fix C23 / gcc 14+ K&R prototype errors on legacy gnulib host files
+    if [ -f "$src/lib/malloc.c" ]; then
+        sed -i 's/void \*malloc ();/void \*malloc (size_t);/' "$src/lib/malloc.c"
+        log "patching lib/malloc.c"
+    fi
+    if [ -f "$src/lib/realloc.c" ]; then
+        sed -i 's/void \*realloc ();/void \*realloc (void \*, size_t);/' "$src/lib/realloc.c"
+        log "patching lib/realloc.c"
+    fi
+    if [ -f "$src/system.h" ]; then
+        sed -i 's|extern char \*strerror ();|// extern char *strerror ();|' "$src/system.h"
+    fi
+    cd "$TOOLCHAIN/build"
+    rm -rf "$name"
+    mkdir "$name"
+    cd "$name"
+
+    export ac_cv_func_malloc_0_nonnull=yes
+    export ac_cv_func_realloc_0_nonnull=yes
+    export glib_cv_stack_grows=no
+    export glib_cv_uscore=no 
+    if [ "$SILENT" -eq 0 ]; then
         "$src/configure" \
             --build="$BUILD" \
             --host="$TARGET" \
             --prefix=/usr \
             --disable-nls \
+            glib_cv_stack_grows=no \
+            glib_cv_uscore=no \
             "$@"
-
         make -j"$(nproc)"
         make DESTDIR="$ROOTFS" install
-    }
-
+     else
+         unset MAKEFLAGS
+         echo "=== CONFIGURE PACKAGE ${name} ===" >> "$NIXIE_LOG"
+         "$src/configure" \
+            --build="$BUILD" \
+            --host="$TARGET" \
+            --prefix=/usr \
+            --disable-nls \
+            glib_cv_stack_grows=no \
+            glib_cv_uscore=no \
+            "$@" >> "$NIXIE_LOG"
+        echo "=== BUILD PACKAGE ${name} ===" >> "$NIXIE_LOG"
+        make -j"$(nproc)" >> "$NIXIE_LOG"
+        echo "=== INSTALL PACKAGE ${name} ===" >> "$NIXIE_LOG"
+        make DESTDIR="$ROOTFS" install >> "$NIXIE_LOG"
+        export MAKEFLAGS="-s V=0 QUIET=1 VERBOSE=0"
+     fi
+}
 # ============================================================
 # download
 # ============================================================
@@ -367,185 +456,71 @@ build_autotools_package() {
 if should_run || [ $DOWNLOAD -ge 1 ]; then
     log "downloading sources"
 
-    download \
-        "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz" \
-        "binutils-${BINUTILS_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz" "binutils-${BINUTILS_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz" "gcc-${GCC_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/glibc/glibc-${GLIBC_VER}.tar.xz" "glibc-${GLIBC_VER}.tar.xz"
+    download "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${LINUX_VER}.tar.xz" "linux-${LINUX_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VER}.tar.xz" "coreutils-${COREUTILS_VER}.tar.xz"
+    download "https://www.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-${LIBCAP_VER}.tar.xz" "libcap-${LIBCAP_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/bash/bash-${BASH_VER}.tar.gz" "bash-${BASH_VER}.tar.gz"
+    download "https://github.com/systemd/systemd/archive/refs/tags/v${SYSTEMD_VER}.tar.gz" "systemd-${SYSTEMD_VER}.tar.gz"
+    download "https://mirror.metanet.ch/gnu/less/less-${LESS_VER}.tar.gz" "less-${LESS_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/which/which-${WHICH_VER}.tar.gz" "which-${WHICH_VER}.tar.gz"
+    download "https://ftp.funet.fi/pub/mirrors/ftp.astron.com/pub/file/file-${FILE_VER}.tar.gz" "file-${FILE_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/grep/grep-${GREP_VER}.tar.xz" "grep-${GREP_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/sed/sed-${SED_VER}.tar.xz" "sed-${SED_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/gawk/gawk-${GAWK_VER}.tar.xz" "gawk-${GAWK_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/tar/tar-${TAR_VER}.tar.xz" "tar-${TAR_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/gzip/gzip-${GZIP_VER}.tar.xz" "gzip-${GZIP_VER}.tar.xz"
+    download "https://tukaani.org/xz/xz-${XZ_VER}.tar.gz" "xz-${XZ_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/findutils/findutils-${FINDUTILS_VER}.tar.xz" "findutils-${FINDUTILS_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/ncurses/ncurses-${NCURSES_VER}.tar.gz" "ncurses-${NCURSES_VER}.tar.gz"
+    download "https://github.com/linux-pam/linux-pam/releases/download/v${PAM_VER}/Linux-PAM-${PAM_VER}.tar.xz" "Linux-PAM-${PAM_VER}.tar.xz"
+    download "https://www.kernel.org/pub/linux/utils/util-linux/v2.42/util-linux-${UTIL_LINUX_VER}.tar.xz" "util-linux-${UTIL_LINUX_VER}.tar.xz"
+    download "https://github.com/besser82/libxcrypt/releases/download/v${LIBXCRYPT_VER}/libxcrypt-${LIBXCRYPT_VER}.tar.xz" "libxcrypt-${LIBXCRYPT_VER}.tar.xz"
+    download "https://dbus.freedesktop.org/releases/dbus/dbus-${DBUS_VER}.tar.xz" "dbus-${DBUS_VER}.tar.xz"
+    download "https://github.com/shadow-maint/shadow/releases/download/${SHADOW_VER}/shadow-${SHADOW_VER}.tar.xz" "shadow-${SHADOW_VER}.tar.xz"
+    download "https://github.com/fastfetch-cli/fastfetch/releases/download/${FASTFETCH_VER}/fastfetch-linux-amd64.tar.gz" "fastfetch-${FASTFETCH_VER}.tar.gz"
+    download "https://github.com/madnight/nano/archive/refs/heads/master.tar.gz" "nano-edge.tar.gz"
+    download "https://gitlab.com/procps-ng/procps/-/archive/master/procps-master.tar.gz?ref_type=heads" "procps-ng-edge.tar.gz"
+    download "https://github.com/htop-dev/htop/archive/refs/heads/main.tar.gz" "htop-edge.tar.gz"
+    download "https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/archive/${NETWORKMANAGER_VER}/NetworkManager-${NETWORKMANAGER_VER}.tar.gz" "NetworkManager-${NETWORKMANAGER_VER}.tar.gz"
+    download "https://github.com/jpirko/libndp/archive/refs/tags/v1.9.tar.gz" "libndp-1.9.tar.gz"
+    download "https://download.gnome.org/sources/glib/2.82/glib-${GLIB_VER}.tar.xz" "glib-${GLIB_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/nettle/nettle-${NETTLE_VER}.tar.gz" "nettle-${NETTLE_VER}.tar.gz"
+    download "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-${GNUTLS_VER}.tar.xz" "gnutls-${GNUTLS_VER}.tar.xz"
+    download "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz" "openssl-${OPENSSL_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz" "gmp-${GMP_VER}.tar.xz"
+    download "https://github.com/rockdaboot/libpsl/releases/download/${LIBPSL_VER}/libpsl-${LIBPSL_VER}.tar.gz" "libpsl-${LIBPSL_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/libunistring/libunistring-${LIBUNI_VER}.tar.gz" "libunistring-${LIBUNI_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/libidn/libidn2-${LIBIDN_VER}.tar.gz" "libidn2-${LIBIDN_VER}.tar.gz"
+    download "https://curl.se/download/curl-${CURL_VER}.tar.xz" "curl-${CURL_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/readline/readline-${READLINE_VER}.tar.gz" "readline-${READLINE_VER}.tar.gz"
+    download "https://releases.pagure.org/newt/newt-${NEWT_VER}.tar.gz" "newt-${NEWT_VER}.tar.gz"
+    download "https://www.jedsoft.org/releases/slang/slang-${SLANG_VER}.tar.bz2" "slang-${SLANG_VER}.tar.bz2"
+    download "https://ftp.osuosl.org/pub/rpm/popt/releases/popt-1.x/popt-${POPT_VER}.tar.gz" "popt-${POPT_VER}.tar.gz"
+    download "https://curl.se/ca/cacert.pem" "ca-certificates.crt"
+    download "https://cdn.kernel.org/pub/linux/utils/kernel/kmod/kmod-${KMOD_VER}.tar.xz" "kmod-${KMOD_VER}.tar.xz"
 
-    download \
-        "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz" \
-        "gcc-${GCC_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/glibc/glibc-${GLIBC_VER}.tar.xz" \
-        "glibc-${GLIBC_VER}.tar.xz"
-
-    download \
-        "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${LINUX_VER}.tar.xz" \
-        "linux-${LINUX_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VER}.tar.xz" \
-        "coreutils-${COREUTILS_VER}.tar.xz"
-
-    download \
-        "https://www.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-${LIBCAP_VER}.tar.xz" \
-        "libcap-${LIBCAP_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/bash/bash-${BASH_VER}.tar.gz" \
-        "bash-${BASH_VER}.tar.gz"
-
-    download \
-        "https://github.com/systemd/systemd/archive/refs/tags/v${SYSTEMD_VER}.tar.gz" \
-        "systemd-${SYSTEMD_VER}.tar.gz"
-
-    download \
-        "https://mirror.metanet.ch/gnu/less/less-${LESS_VER}.tar.gz" \
-        "less-${LESS_VER}.tar.gz"
-
-    download \
-        "https://ftp.gnu.org/gnu/which/which-${WHICH_VER}.tar.gz" \
-        "which-${WHICH_VER}.tar.gz"
-
-    download \
-        "https://ftp.funet.fi/pub/mirrors/ftp.astron.com/pub/file/file-${FILE_VER}.tar.gz" \
-        "file-${FILE_VER}.tar.gz"
-
-    download \
-        "https://ftp.gnu.org/gnu/grep/grep-${GREP_VER}.tar.xz" \
-        "grep-${GREP_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/sed/sed-${SED_VER}.tar.xz" \
-        "sed-${SED_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/gawk/gawk-${GAWK_VER}.tar.xz" \
-        "gawk-${GAWK_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/tar/tar-${TAR_VER}.tar.xz" \
-        "tar-${TAR_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/gzip/gzip-${GZIP_VER}.tar.xz" \
-        "gzip-${GZIP_VER}.tar.xz"
-
-    download \
-        "https://tukaani.org/xz/xz-${XZ_VER}.tar.gz" \
-        "xz-${XZ_VER}.tar.gz"
-
-    download \
-        "https://ftp.gnu.org/gnu/findutils/findutils-${FINDUTILS_VER}.tar.xz" \
-        "findutils-${FINDUTILS_VER}.tar.xz"
-
-    download \
-        "https://ftp.gnu.org/gnu/ncurses/ncurses-${NCURSES_VER}.tar.gz" \
-        "ncurses-${NCURSES_VER}.tar.gz"
-
-    download \
-        "https://github.com/linux-pam/linux-pam/releases/download/v${PAM_VER}/Linux-PAM-${PAM_VER}.tar.xz" \
-        "Linux-PAM-${PAM_VER}.tar.xz"
-
-    download \
-        "https://www.kernel.org/pub/linux/utils/util-linux/v2.42/util-linux-${UTIL_LINUX_VER}.tar.xz" \
-        "util-linux-${UTIL_LINUX_VER}.tar.xz"
-    
-    download \
-        "https://github.com/besser82/libxcrypt/releases/download/v${LIBXCRYPT_VER}/libxcrypt-${LIBXCRYPT_VER}.tar.xz" \
-        "libxcrypt-${LIBXCRYPT_VER}.tar.xz"
-        
-    download \
-        "https://dbus.freedesktop.org/releases/dbus/dbus-${DBUS_VER}.tar.xz" \
-        "dbus-${DBUS_VER}.tar.xz"
-        
-    download \
-        "https://github.com/shadow-maint/shadow/releases/download/${SHADOW_VER}/shadow-${SHADOW_VER}.tar.xz" \
-        "shadow-${SHADOW_VER}.tar.xz"
-        
-    download \
-        "https://github.com/fastfetch-cli/fastfetch/releases/download/${FASTFETCH_VER}/fastfetch-linux-amd64.tar.gz" \
-        "fastfetch-${FASTFETCH_VER}.tar.gz"
-        
-    download \
-        "https://github.com/madnight/nano/archive/refs/heads/master.tar.gz" \
-        "nano-edge.tar.gz"
-        
-    download \
-        "https://gitlab.com/procps-ng/procps/-/archive/master/procps-master.tar.gz?ref_type=heads" \
-        "procps-ng-edge.tar.gz"
-        
-    download \
-        "https://github.com/htop-dev/htop/archive/refs/heads/main.tar.gz" \
-        "htop-edge.tar.gz"
-        
-    download \
-        "https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/archive/${NETWORKMANAGER_VER}/NetworkManager-${NETWORKMANAGER_VER}.tar.gz" \
-        "NetworkManager-${NETWORKMANAGER_VER}.tar.gz"
-
-    download \
-        "https://github.com/jpirko/libndp/archive/refs/tags/v1.9.tar.gz" \
-        "libndp-1.9.tar.gz"
-        
-    download \
-        "https://download.gnome.org/sources/glib/2.82/glib-${GLIB_VER}.tar.xz" \
-        "glib-${GLIB_VER}.tar.xz"
-        
-    download \
-        "https://ftp.gnu.org/gnu/nettle/nettle-${NETTLE_VER}.tar.gz" \
-        "nettle-${NETTLE_VER}.tar.gz"
-
-    download \
-        "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-${GNUTLS_VER}.tar.xz" \
-        "gnutls-${GNUTLS_VER}.tar.xz"
-        
-    download \
-        "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz" \
-        "openssl-${OPENSSL_VER}.tar.gz"
-        
-    download \
-        "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz" \
-        "gmp-${GMP_VER}.tar.xz"
-        
-    download \
-    	"https://github.com/rockdaboot/libpsl/releases/download/${LIBPSL_VER}/libpsl-${LIBPSL_VER}.tar.gz" \
-	"libpsl-${LIBPSL_VER}.tar.gz"
-
-    download \
-        "https://ftp.gnu.org/gnu/libunistring/libunistring-${LIBUNI_VER}.tar.gz" \
-        "libunistring-${LIBUNI_VER}.tar.gz"
-        
-    download \
-	"https://ftp.gnu.org/gnu/libidn/libidn2-${LIBIDN_VER}.tar.gz" \
-	"libidn2-${LIBIDN_VER}.tar.gz"
-	
-    download \
-        "https://curl.se/download/curl-${CURL_VER}.tar.xz" \
-        "curl-${CURL_VER}.tar.xz"
-        
-    download \
-        "https://ftp.gnu.org/gnu/readline/readline-${READLINE_VER}.tar.gz" \
-        "readline-${READLINE_VER}.tar.gz"
-        
-    download \
-        "https://releases.pagure.org/newt/newt-${NEWT_VER}.tar.gz" \
-        "newt-${NEWT_VER}.tar.gz"
- 
-    download \
-        "https://www.jedsoft.org/releases/slang/slang-${SLANG_VER}.tar.bz2" \
-        "slang-${SLANG_VER}.tar.bz2"
-
-    download \
-        "https://ftp.osuosl.org/pub/rpm/popt/releases/popt-1.x/popt-${POPT_VER}.tar.gz" \
-        "popt-${POPT_VER}.tar.gz"
-    
-    download \
-        "https://curl.se/ca/cacert.pem" \
-        "ca-certificates.crt"
-        
-    download \
-        "https://cdn.kernel.org/pub/linux/utils/kernel/kmod/kmod-${KMOD_VER}.tar.xz" \
-        "kmod-${KMOD_VER}.tar.xz"
+    # new build tools downloads
+    download "https://ftp.gnu.org/gnu/m4/m4-${M4_VER}.tar.xz" "m4-${M4_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/autoconf/autoconf-${AUTOCONF_VER}.tar.xz" "autoconf-${AUTOCONF_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/automake/automake-${AUTOMAKE_VER}.tar.xz" "automake-${AUTOMAKE_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/libtool/libtool-${LIBTOOL_VER}.tar.xz" "libtool-${LIBTOOL_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/make/make-${MAKE_VER}.tar.gz" "make-${MAKE_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/bison/bison-${BISON_VER}.tar.xz" "bison-${BISON_VER}.tar.xz"
+    download "https://github.com/westes/flex/releases/download/v${FLEX_VER}/flex-${FLEX_VER}.tar.gz" "flex-${FLEX_VER}.tar.gz"
+    download "https://pkgconfig.freedesktop.org/releases/pkg-config-${PKGCONFIG_VER}.tar.gz" "pkg-config-${PKGCONFIG_VER}.tar.gz"
+    download "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VER}.tar.gz" "ninja-${NINJA_VER}.tar.gz"
+    download "https://github.com/mesonbuild/meson/releases/download/${MESON_VER}/meson-${MESON_VER}.tar.gz" "meson-${MESON_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/texinfo/texinfo-${TEXINFO_VER}.tar.xz" "texinfo-${TEXINFO_VER}.tar.xz"
+    download "https://download.savannah.gnu.org/releases/libpipeline/libpipeline-${LIBPIPELINE_VER}.tar.gz" "libpipeline-${LIBPIPELINE_VER}.tar.gz"
+    download "https://ftp.gnu.org/gnu/groff/groff-${GROFF_VER}.tar.gz" "groff-${GROFF_VER}.tar.gz"
+    download "https://download.savannah.gnu.org/releases/man-db/man-db-${MAN_DB_VER}.tar.xz" "man-db-${MAN_DB_VER}.tar.xz"
+    download "https://cdn.kernel.org/pub/linux/docs/man-pages/man-pages-${MAN_PAGES_VER}.tar.xz" "man-pages-${MAN_PAGES_VER}.tar.xz"
+    download "https://ftp.gnu.org/gnu/gdbm/gdbm-${GDBM_VER}.tar.gz" "gdbm-${GDBM_VER}.tar.gz"
+    download "https://www.cpan.org/src/5.0/perl-${PERL_VER}.tar.gz" "perl-${PERL_VER}.tar.gz"
+    download "https://raw.githubusercontent.com/funicat1/nxpm-src/refs/heads/main/nxbuild" "nxbuild"
 fi
 
 next_step
@@ -559,137 +534,69 @@ if should_run || [ $DOWNLOAD -ge 1 ]; then
 
     cd "$TOOLCHAIN/src"
 
-    log "extract $SOURCES/binutils-${BINUTILS_VER}.tar.xz"
     tar -xf "$SOURCES/binutils-${BINUTILS_VER}.tar.xz"
-
-    log "extract $SOURCES/gcc-${GCC_VER}.tar.xz"
     tar -xf "$SOURCES/gcc-${GCC_VER}.tar.xz"
-
-    log "extract $SOURCES/glibc-${GLIBC_VER}.tar.xz"
     tar -xf "$SOURCES/glibc-${GLIBC_VER}.tar.xz"
-
-    log "extract $SOURCES/linux-${LINUX_VER}.tar.xz"
     tar -xf "$SOURCES/linux-${LINUX_VER}.tar.xz"
-
-    log "extract $SOURCES/coreutils-${COREUTILS_VER}.tar.xz"
     tar -xf "$SOURCES/coreutils-${COREUTILS_VER}.tar.xz"
-
-    log "extract $SOURCES/libcap-${LIBCAP_VER}.tar.xz"
     tar -xf "$SOURCES/libcap-${LIBCAP_VER}.tar.xz"
-
-    log "extract $SOURCES/bash-${BASH_VER}.tar.gz"
     tar -xf "$SOURCES/bash-${BASH_VER}.tar.gz"
-
-    log "extract $SOURCES/systemd-${SYSTEMD_VER}.tar.gz"
     tar -xf "$SOURCES/systemd-${SYSTEMD_VER}.tar.gz"
-
-    log "extract $SOURCES/less-${LESS_VER}.tar.gz"
     tar -xf "$SOURCES/less-${LESS_VER}.tar.gz"
-
-    log "extract $SOURCES/which-${WHICH_VER}.tar.gz"
     tar -xf "$SOURCES/which-${WHICH_VER}.tar.gz"
-
-    log "extract $SOURCES/file-${FILE_VER}.tar.gz"
     tar -xf "$SOURCES/file-${FILE_VER}.tar.gz"
-
-    log "extract $SOURCES/grep-${GREP_VER}.tar.xz"
     tar -xf "$SOURCES/grep-${GREP_VER}.tar.xz"
-
-    log "extract $SOURCES/sed-${SED_VER}.tar.xz"
     tar -xf "$SOURCES/sed-${SED_VER}.tar.xz"
-
-    log "extract $SOURCES/gawk-${GAWK_VER}.tar.xz"
     tar -xf "$SOURCES/gawk-${GAWK_VER}.tar.xz"
-
-    log "extract $SOURCES/tar-${TAR_VER}.tar.xz"
     tar -xf "$SOURCES/tar-${TAR_VER}.tar.xz"
-
-    log "extract $SOURCES/gzip-${GZIP_VER}.tar.xz"
     tar -xf "$SOURCES/gzip-${GZIP_VER}.tar.xz"
-
-    log "extract $SOURCES/xz-${XZ_VER}.tar.gz"
     tar -xf "$SOURCES/xz-${XZ_VER}.tar.gz"
-
-    log "extract $SOURCES/findutils-${FINDUTILS_VER}.tar.xz"
     tar -xf "$SOURCES/findutils-${FINDUTILS_VER}.tar.xz"
-
-    log "extract $SOURCES/ncurses-${NCURSES_VER}.tar.gz"
     tar -xf "$SOURCES/ncurses-${NCURSES_VER}.tar.gz"
-
-    log "extract $SOURCES/Linux-PAM-${PAM_VER}.tar.xz"
     tar -xf "$SOURCES/Linux-PAM-${PAM_VER}.tar.xz"
-
-    log "extract $SOURCES/util-linux-${UTIL_LINUX_VER}.tar.xz"
     tar -xf "$SOURCES/util-linux-${UTIL_LINUX_VER}.tar.xz"
-   
-    log "extract $SOURCES/libxcrypt-${LIBXCRYPT_VER}.tar.xz"
     tar -xf "$SOURCES/libxcrypt-${LIBXCRYPT_VER}.tar.xz"
-    
-    log "extract $SOURCES/dbus-${DBUS_VER}.tar.xz"
     tar -xf "$SOURCES/dbus-${DBUS_VER}.tar.xz"
-    
-    log "extract $SOURCES/shadow-${SHADOW_VER}.tar.xz"
     tar -xf "$SOURCES/shadow-${SHADOW_VER}.tar.xz"
-    
-    log "extract $SOURCES/fastfetch-${FASTFETCH_VER}.tar.gz"
     tar -xf "$SOURCES/fastfetch-${FASTFETCH_VER}.tar.gz"
-    
-    log "extract $SOURCES/nano-edge.tar.gz"
     tar -xf "$SOURCES/nano-edge.tar.gz"
-    
-    log "extract $SOURCES/procps-ng-edge.tar.gz"
     tar -xf "$SOURCES/procps-ng-edge.tar.gz"
-    
-    log "extract $SOURCES/htop-edge.tar.gz"
     tar -xf "$SOURCES/htop-edge.tar.gz"
-    
-    log "extract $SOURCES/NetworkManager-${NETWORKMANAGER_VER}.tar.gz"
     tar -xf "$SOURCES/NetworkManager-${NETWORKMANAGER_VER}.tar.gz"
-
-    log "extract $SOURCES/libndp-${LIBNDP_VER}.tar.gz"
     tar -xf "$SOURCES/libndp-${LIBNDP_VER}.tar.gz"
-
-    log "extract $SOURCES/glib-${GLIB_VER}.tar.xz"
     tar -xf "$SOURCES/glib-${GLIB_VER}.tar.xz"
-    
-    log "extract $SOURCES/nettle-${NETTLE_VER}.tar.gz"
     tar -xf "$SOURCES/nettle-${NETTLE_VER}.tar.gz"
-
-    log "extract $SOURCES/gnutls-${GNUTLS_VER}.tar.xz"
     tar -xf "$SOURCES/gnutls-${GNUTLS_VER}.tar.xz"
-    
-    log "extract $SOURCES/openssl-${OPENSSL_VER}.tar.gz"
     tar -xf "$SOURCES/openssl-${OPENSSL_VER}.tar.gz"
-    
-    log "extract $SOURCES/gmp-${GMP_VER}.tar.xz"
     tar -xf "$SOURCES/gmp-${GMP_VER}.tar.xz"
-    
-    log "extract $SOURCES/libpsl-${LIBPSL_VER}.tar.gz"
     tar -xf "$SOURCES/libpsl-${LIBPSL_VER}.tar.gz"
-    
-    log "extract $SOURCES/libunistring-${LIBUNI_VER}.tar.gz"
     tar -xf "$SOURCES/libunistring-${LIBUNI_VER}.tar.gz"
-    
-    log "extract $SOURCES/libidn2-${LIBIDN_VER}.tar.gz"
     tar -xf "$SOURCES/libidn2-${LIBIDN_VER}.tar.gz"
-    
-    log "extract $SOURCES/curl-${CURL_VER}.tar.xz"
     tar -xf "$SOURCES/curl-${CURL_VER}.tar.xz"
-    
-    log "extract $SOURCES/readline-${READLINE_VER}.tar.gz"
     tar -xf "$SOURCES/readline-${READLINE_VER}.tar.gz"
-    
-    log "extract $SOURCES/newt-${NEWT_VER}.tar.gz"
     tar -xf "$SOURCES/newt-${NEWT_VER}.tar.gz"
-    
-    log "extract $SOURCES/slang-${SLANG_VER}.tar.bz2"
     tar -xf "$SOURCES/slang-${SLANG_VER}.tar.bz2"
-
-    log "extract $SOURCES/popt-${POPT_VER}.tar.gz"
     tar -xf "$SOURCES/popt-${POPT_VER}.tar.gz"
-    
-    log "extract $SOURCES/kmod-${KMOD_VER}.tar.xz"
     tar -xf "$SOURCES/kmod-${KMOD_VER}.tar.xz"
+    tar -xf "$SOURCES/gdbm-${GDBM_VER}.tar.gz"
+    tar -xf "$SOURCES/perl-${PERL_VER}.tar.gz"
+
+    # extract build tools
+    tar -xf "$SOURCES/m4-${M4_VER}.tar.xz"
+    tar -xf "$SOURCES/autoconf-${AUTOCONF_VER}.tar.xz"
+    tar -xf "$SOURCES/automake-${AUTOMAKE_VER}.tar.xz"
+    tar -xf "$SOURCES/libtool-${LIBTOOL_VER}.tar.xz"
+    tar -xf "$SOURCES/make-${MAKE_VER}.tar.gz"
+    tar -xf "$SOURCES/bison-${BISON_VER}.tar.xz"
+    tar -xf "$SOURCES/flex-${FLEX_VER}.tar.gz"
+    tar -xf "$SOURCES/pkg-config-${PKGCONFIG_VER}.tar.gz"
+    tar -xf "$SOURCES/ninja-${NINJA_VER}.tar.gz"
+    tar -xf "$SOURCES/meson-${MESON_VER}.tar.gz"
+    tar -xf "$SOURCES/texinfo-${TEXINFO_VER}.tar.xz"
+    tar -xf "$SOURCES/libpipeline-${LIBPIPELINE_VER}.tar.gz"
+    tar -xf "$SOURCES/groff-${GROFF_VER}.tar.gz"
+    tar -xf "$SOURCES/man-db-${MAN_DB_VER}.tar.xz"
+    tar -xf "$SOURCES/man-pages-${MAN_PAGES_VER}.tar.xz"
 fi
 
 SYSTEMD_SRC="$TOOLCHAIN/src/systemd-${SYSTEMD_VER}"
@@ -730,6 +637,8 @@ NEWT_SRC="$TOOLCHAIN/src/newt-${NEWT_VER}"
 SLANG_SRC="$TOOLCHAIN/src/slang-${SLANG_VER}"
 POPT_SRC="$TOOLCHAIN/src/popt-${POPT_VER}"
 KMOD_SRC="$TOOLCHAIN/src/kmod-${KMOD_VER}"
+GDBM_SRC="$TOOLCHAIN/src/gdbm-${GDBM_VER}"
+
 
 next_step
 
@@ -739,26 +648,19 @@ next_step
 
 if should_run; then
     log "downloading gcc prerequisites..."
-
     cd "$TOOLCHAIN/src/gcc-${GCC_VER}"
     ./contrib/download_prerequisites
 fi
 
-# don't count gcc prerequisites as a resume step
 # ============================================================
 # linux userspace headers
 # ============================================================
 
 if should_run; then
     log "installing linux headers..."
-
     mkdir -p "$ROOTFS/usr"
-
     cd "$TOOLCHAIN/src/linux-${LINUX_VER}"
-
-    make ARCH=x86_64 \
-        headers_install \
-        INSTALL_HDR_PATH="$ROOTFS/usr"
+    make ARCH=x86_64 headers_install INSTALL_HDR_PATH="$ROOTFS/usr"
 fi
 
 next_step
@@ -768,10 +670,8 @@ next_step
 # ============================================================
 
 if should_run; then
-    log "building binutils..."
-
+    log "building cross binutils..."
     cd "$TOOLCHAIN/build"
-
     rm -rf binutils
     mkdir binutils
     cd binutils
@@ -796,9 +696,7 @@ next_step
 
 if should_run; then
     log "building bootstrap gcc..."
-
     cd "$TOOLCHAIN/build"
-
     rm -rf gcc-bootstrap
     mkdir gcc-bootstrap
     cd gcc-bootstrap
@@ -831,9 +729,7 @@ next_step
 
 if should_run; then
     log "installing glibc headers..."
-
     cd "$TOOLCHAIN/build"
-
     rm -rf glibc
     mkdir glibc
     cd glibc
@@ -844,9 +740,7 @@ if should_run; then
     "$TOOLCHAIN/src/glibc-${GLIBC_VER}/configure" \
         --prefix=/usr \
         --host="$TARGET" \
-        --build="$(
-            "$TOOLCHAIN/src/glibc-${GLIBC_VER}/scripts/config.guess"
-        )" \
+        --build="$( "$TOOLCHAIN/src/glibc-${GLIBC_VER}/scripts/config.guess" )" \
         --with-headers="$ROOTFS/usr/include" \
         --disable-werror \
         --disable-multilib \
@@ -855,20 +749,11 @@ if should_run; then
         libc_cv_forced_unwind=yes \
         libc_cv_c_cleanup=yes
 
-    make install-bootstrap-headers=yes \
-        install-headers \
-        DESTDIR="$ROOTFS"
-
+    make install-bootstrap-headers=yes install-headers DESTDIR="$ROOTFS"
     make csu/subdir_lib
 
     mkdir -p "$ROOTFS/usr/lib"
-
-    cp -v \
-        csu/crt1.o \
-        csu/crti.o \
-        csu/crtn.o \
-        "$ROOTFS/usr/lib/"
-
+    cp -v csu/crt1.o csu/crti.o csu/crtn.o "$ROOTFS/usr/lib/"
     touch "$ROOTFS/usr/include/gnu/stubs.h"
 fi
 
@@ -880,9 +765,7 @@ next_step
 
 if should_run; then
     log "building bootstrap libgcc..."
-
     cd "$TOOLCHAIN/build/gcc-bootstrap"
-
     make all-target-libgcc -j"$(nproc)"
     make install-target-libgcc
 fi
@@ -895,7 +778,6 @@ next_step
 
 if should_run; then
     log "building glibc..."
-
     cd "$TOOLCHAIN/build/glibc"
 
     export CC="${TARGET}-gcc"
@@ -916,14 +798,12 @@ fi
 next_step
 
 # ============================================================
-# final gcc
+# final cross gcc
 # ============================================================
 
 if should_run; then
-    log "building final gcc..."
-
+    log "building final cross gcc..."
     cd "$TOOLCHAIN/build"
-
     rm -rf gcc
     mkdir gcc
     cd gcc
@@ -973,8 +853,6 @@ BUILD="$(gcc -dumpmachine)"
 # usr-merge rootfs layout
 # ============================================================
 
-# systemd requires a merged /usr filesystem. Keep the compatibility
-# symlinks so the early userspace still sees the traditional paths.
 ensure_usr_merge() {
     mkdir -p \
         "$ROOTFS/usr/bin" \
@@ -1005,9 +883,7 @@ ensure_usr_merge
 
 if should_run; then
     log "building coreutils..."
-
     cd "$TOOLCHAIN/build"
-
     rm -rf coreutils
     mkdir coreutils
     cd coreutils
@@ -1021,9 +897,7 @@ if should_run; then
         --without-selinux
 
     make -j"$(nproc)"
-
-    make DESTDIR="$ROOTFS" \
-        install
+    make DESTDIR="$ROOTFS" install
 fi
 
 next_step
@@ -1034,7 +908,6 @@ next_step
 
 if should_run; then
     log "building bash..."
-
     cd "$TOOLCHAIN/build"
     rm -rf bash
     mkdir bash
@@ -1049,10 +922,7 @@ if should_run; then
         --disable-nls
 
     make -j"$(nproc)"
-
-    make DESTDIR="$ROOTFS" \
-        install
-
+    make DESTDIR="$ROOTFS" install
     ln -sfn bash "$ROOTFS/usr/bin/sh"
 fi
 
@@ -1064,9 +934,7 @@ next_step
 
 if should_run; then
     log "building libcap..."
-
     cd "$LIBCAP_SRC"
-
     make clean >/dev/null 2>&1 || true
 
     make -j"$(nproc)" \
@@ -1077,25 +945,13 @@ if should_run; then
         CFLAGS="-O2 -pipe -fPIC" \
         BUILD_CFLAGS="-O2 -pipe"
 
-    make install \
-        DESTDIR="$ROOTFS" \
-        prefix=/usr
-
-    log "libcap installed into target rootfs."
-
-    echo
-
-    log "creating target pkg-config wrapper..."
+    make install DESTDIR="$ROOTFS" prefix=/usr
 
     cat > "$TOOLCHAIN/bin/${TARGET}-pkg-config" <<EOF2
 #!/usr/bin/env bash
-
 export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
-
-export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib64/pkgconfig:$ROOTFS/usr/lib/pkgconfig:$ROOTFS/usr/share/pkgconfig"
-
-export PKG_CONFIG_PATH="$ROOTFS/usr/lib64/pkgconfig:$ROOTFS/usr/lib/pkgconfig:$ROOTFS/usr/share/pkgconfig"
-
+export PKG_CONFIG_LIBDIR="/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+export PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
 exec /usr/bin/pkg-config "\$@"
 EOF2
 
@@ -1137,12 +993,7 @@ EOF
     make -j"$(nproc)"
     make DESTDIR="$ROOTFS" install
 
-    # ============================================================
-    # libxcrypt
-    # ============================================================
-
     log "building libxcrypt ${LIBXCRYPT_VER}..."
-
     cd "$TOOLCHAIN/build"
     rm -rf libxcrypt
     mkdir libxcrypt
@@ -1157,12 +1008,8 @@ EOF
         --disable-static
 
     make -j"$(nproc)"
-
     make DESTDIR="$ROOTFS" install
 
-    log "libxcrypt installed into target rootfs."
-    
-    # Linux-PAM 1.7.x uses Meson. Optional integrations stay disabled here.
     log "building linux-pam ${PAM_VER}..."
     cd "$TOOLCHAIN/build"
     rm -rf linux-pam
@@ -1202,29 +1049,17 @@ EOF2
     meson compile -C linux-pam -j"$(nproc)"
     DESTDIR="$ROOTFS" meson install -C linux-pam
 
-    mkdir -p \
-        "$ROOTFS/etc/pam.d" \
-        "$ROOTFS/etc/security" \
-        "$ROOTFS/usr/lib/security"
-        
+    mkdir -p "$ROOTFS/etc/pam.d" "$ROOTFS/etc/security" "$ROOTFS/usr/lib/security"
 
-    log "patching util-linux ${UTIL_LINUX_VER}! (https://kernel.googlesource.com/pub/scm/utils/util-linux/util-linux.git/%2B/7e2e010874b10b3aabdc3c4c844c9ffc46a4a374)"
+    log "patching util-linux ${UTIL_LINUX_VER}..."
     cd "$UTIL_LINUX_SRC"
-    # fix hook_idmap.c
-	sed -i '/#include "all-io.h"/a #include "fileutils.h"' \
-	    libmount/src/hook_idmap.c
+    sed -i '/#include "all-io.h"/a #include "fileutils.h"' libmount/src/hook_idmap.c
+    sed -i '/#include <sys\/stat.h>/a\
+#ifdef HAVE_LINUX_OPENAT2_H\
+# include <linux/openat2.h>\
+#endif' include/fileutils.h
+    sed -i 's/# define RESOLVE_NO_SYMLINKS[[:space:]]*0x02/# define RESOLVE_NO_SYMLINKS 0x04/' include/fileutils.h
 
-	# fix fileutils.h so it gets the real kernel definitions
-	sed -i '/#include <sys\/stat.h>/a\
-	#ifdef HAVE_LINUX_OPENAT2_H\
-	# include <linux/openat2.h>\
-	#endif' \
-	    include/fileutils.h
-
-	# fix the incorrect fallback in 2.42.3
-	sed -i 's/# define RESOLVE_NO_SYMLINKS[[:space:]]*0x02/# define RESOLVE_NO_SYMLINKS 0x04/' \
-	    include/fileutils.h
-    # util-linux is last because it can use both ncurses and PAM.
     build_autotools_package "util-linux" "$UTIL_LINUX_SRC" \
         --libdir=/usr/lib64 \
         --bindir=/usr/bin \
@@ -1242,45 +1077,6 @@ EOF2
         --without-cryptsetup \
         --without-zstd \
         --without-bzip2
-fi
-
-next_step
-
-# ============================================================
-# shadow
-# ============================================================
-
-if should_run; then
-    log "building shadow ${SHADOW_VER}..."
-
-    cd "$TOOLCHAIN/build"
-
-    rm -rf shadow
-    mkdir shadow
-    cd shadow
-
-    "$SHADOW_SRC/configure" \
-        --build="$BUILD" \
-        --host="$TARGET" \
-        --prefix=/usr \
-        --sysconfdir=/etc \
-        --libdir=/usr/lib64 \
-        --sbindir=/usr/sbin \
-        --enable-shared \
-        --with-libpam \
-        --without-selinux \
-        --without-audit \
-        --without-tcb \
-        --disable-man \
-        --without-libbsd \
-        --disable-nls \
-        --disable-account-tools-setuid
-
-    make -j"$(nproc)"
-
-    make DESTDIR="$ROOTFS" install
-
-    log "shadow installed into target rootfs."
 fi
 
 next_step
@@ -1308,80 +1104,7 @@ if should_run; then
         no-tests
 
     make -j"$(nproc)"
-    make DESTDIR="$ROOTFS" install_sw install_ssldirs
-fi
-
-next_step
-
-# ============================================================
-# dbus
-# ============================================================
-
-if should_run; then
-    log "building dbus ${DBUS_VER}..."
-
-    cd "$TOOLCHAIN/build"
-
-    rm -rf dbus
-
-    cat > "$TOOLCHAIN/build/dbus-cross.txt" <<EOF2
-[binaries]
-c = ['ccache', '${TARGET}-gcc']
-cpp = ['ccache', '${TARGET}-g++']
-ar = '${TARGET}-ar'
-strip = '${TARGET}-strip'
-pkg-config = '${TARGET}-pkg-config'
-
-[properties]
-sys_root = '$ROOTFS'
-needs_exe_wrapper = true
-
-[host_machine]
-system = 'linux'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
-endian = 'little'
-EOF2
-
-    meson setup dbus \
-        "$DBUS_SRC" \
-        --cross-file "$TOOLCHAIN/build/dbus-cross.txt" \
-        --prefix=/usr \
-        --libdir=/usr/lib64 \
-        --sysconfdir=/etc \
-        --localstatedir=/var \
-        --buildtype=release \
-        -Dmessage_bus=true \
-        -Dsystemd=enabled \
-        -Duser_session=true \
-        -Dtraditional_activation=true \
-        -Dtools=true \
-        -Dmodular_tests=disabled \
-        -Dinstalled_tests=false \
-        -Ddoxygen_docs=disabled \
-        -Dducktype_docs=disabled \
-        -Dxml_docs=disabled \
-        -Dqt_help=disabled \
-        -Dx11_autolaunch=disabled \
-        -Dselinux=disabled \
-        -Dapparmor=disabled \
-        -Dlibaudit=disabled \
-        -Dvalgrind=disabled \
-        -Dsystemd_system_unitdir=/usr/lib/systemd/system \
-        -Dsystemd_user_unitdir=/usr/lib/systemd/user \
-        -Druntime_dir=/run \
-        -Dsystem_socket=/run/dbus/system_bus_socket \
-        -Ddbus_user=messagebus
-
-    meson compile \
-        -C dbus \
-        -j"$(nproc)"
-
-    DESTDIR="$ROOTFS" \
-        meson install \
-        -C dbus
-
-    log "dbus installed into target rootfs."
+    make DESTDIR="$ROOTFS" install_sw install_ssldirs install_docs
 fi
 
 next_step
@@ -1392,10 +1115,7 @@ next_step
 
 if should_run; then
     log "building gmp ${GMP_VER}..."
-    CC="${TARGET}-gcc" \
-    CXX="${TARGET}-g++" \
-    CFLAGS="-O2 -pipe -std=gnu17" \
-    CXXFLAGS="-O2 -pipe" \
+    CC="${TARGET}-gcc" CXX="${TARGET}-g++" CFLAGS="-O2 -pipe -std=gnu17" CXXFLAGS="-O2 -pipe" \
     build_autotools_package "gmp" "$GMP_SRC" \
         --libdir=/usr/lib64 \
         --enable-cxx
@@ -1403,13 +1123,11 @@ if should_run; then
     log "building nettle ${NETTLE_VER}..."
     build_autotools_package "nettle" "$NETTLE_SRC" \
         --libdir=/usr/lib64 \
-        --enable-public-key \
-        --disable-documentation
+        --enable-public-key
 
     log "building gnutls ${GNUTLS_VER}..."
     build_autotools_package "gnutls" "$GNUTLS_SRC" \
         --libdir=/usr/lib64 \
-        --disable-doc \
         --disable-tests \
         --disable-tools \
         --with-included-libtasn1 \
@@ -1424,10 +1142,28 @@ next_step
 # ============================================================
 
 if should_run; then 
-    log "building systemd ${SYSTEMD_VER}..."
-    
+    log "building kmod..."
     cd "$TOOLCHAIN/build"
+    rm -rf kmod
+    mkdir kmod
+    cd kmod
 
+    "$KMOD_SRC/configure" \
+        --build="$BUILD" \
+        --host="$TARGET" \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --libdir=/usr/lib64 \
+        --with-xz=no \
+        --with-zstd=no \
+        --with-zlib=no \
+        --with-openssl=no
+
+    make -j"$(nproc)"
+    make DESTDIR="$ROOTFS" install
+
+    log "building systemd ${SYSTEMD_VER}..."
+    cd "$TOOLCHAIN/build"
     rm -rf systemd
 
     cat > "$TOOLCHAIN/build/systemd-cross.txt" <<EOF2
@@ -1487,7 +1223,7 @@ EOF2
         -Dnss-resolve=enabled \
         -Djournal-storage-default=persistent \
         -Dcreate-log-dirs=true \
-        -Dman=disabled \
+        -Dman=enabled \
         -Dhtml=disabled \
         -Dtranslations=false \
         -Dbootloader=disabled \
@@ -1514,13 +1250,105 @@ EOF2
         -Dlibarchive=disabled \
         -Dbpf-framework=disabled
 
-    meson compile \
-        -C systemd \
-        -j"$(nproc)"
+    meson compile -C systemd -j"$(nproc)"
+    DESTDIR="$ROOTFS" meson install -C systemd
+fi
 
-    DESTDIR="$ROOTFS" \
-        meson install \
-        -C systemd
+next_step
+
+# ============================================================
+# dbus
+# ============================================================
+
+if should_run; then
+    log "building dbus ${DBUS_VER}..."
+    cd "$TOOLCHAIN/build"
+    rm -rf dbus
+
+    cat > "$TOOLCHAIN/build/dbus-cross.txt" <<EOF2
+[binaries]
+c = ['ccache', '${TARGET}-gcc']
+cpp = ['ccache', '${TARGET}-g++']
+ar = '${TARGET}-ar'
+strip = '${TARGET}-strip'
+pkg-config = '${TARGET}-pkg-config'
+
+[properties]
+sys_root = '$ROOTFS'
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF2
+
+    meson setup dbus \
+        "$DBUS_SRC" \
+        --cross-file "$TOOLCHAIN/build/dbus-cross.txt" \
+        --prefix=/usr \
+        --libdir=/usr/lib64 \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --buildtype=release \
+        -Dmessage_bus=true \
+        -Dsystemd=enabled \
+        -Duser_session=true \
+        -Dtraditional_activation=true \
+        -Dtools=true \
+        -Dmodular_tests=disabled \
+        -Dinstalled_tests=false \
+        -Ddoxygen_docs=disabled \
+        -Dducktype_docs=disabled \
+        -Dxml_docs=enabled \
+        -Dqt_help=disabled \
+        -Dx11_autolaunch=disabled \
+        -Dselinux=disabled \
+        -Dapparmor=disabled \
+        -Dlibaudit=disabled \
+        -Dvalgrind=disabled \
+        -Dsystemd_system_unitdir=/usr/lib/systemd/system \
+        -Dsystemd_user_unitdir=/usr/lib/systemd/user \
+        -Druntime_dir=/run \
+        -Dsystem_socket=/run/dbus/system_bus_socket \
+        -Ddbus_user=messagebus
+
+    meson compile -C dbus -j"$(nproc)"
+    DESTDIR="$ROOTFS" meson install -C dbus
+fi
+
+next_step
+
+# ============================================================
+# shadow
+# ============================================================
+
+if should_run; then
+    log "building shadow ${SHADOW_VER}..."
+    cd "$TOOLCHAIN/build"
+    rm -rf shadow
+    mkdir shadow
+    cd shadow
+
+    "$SHADOW_SRC/configure" \
+        --build="$BUILD" \
+        --host="$TARGET" \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --libdir=/usr/lib64 \
+        --sbindir=/usr/sbin \
+        --enable-shared \
+        --with-libpam \
+        --without-selinux \
+        --without-audit \
+        --without-tcb \
+        --without-libbsd \
+        --disable-nls \
+        --disable-account-tools-setuid
+
+    make -j"$(nproc)"
+    make DESTDIR="$ROOTFS" install
 fi
 
 next_step
@@ -1530,24 +1358,18 @@ next_step
 # ============================================================
 
 if should_run; then
-    export PKG_CONFIG_PATH="$ROOTFS/usr/lib/pkgconfig:$ROOTFS/usr/share/pkgconfig"
+    export PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
     
     (cd "$LIBNDP_SRC" && ./autogen.sh)
-    build_autotools_package "libndp" "$LIBNDP_SRC" \
-        --libdir=/usr/lib64
+    build_autotools_package "libndp" "$LIBNDP_SRC" --libdir=/usr/lib64
     
-    log "building libunistring ${LIBPSL_VER}"
+    log "building libunistring ${LIBUNI_VER}"
     cd "$TOOLCHAIN/build"
     rm -rf libunistring
     mkdir libunistring
     cd libunistring
-    "$LIBUNI_SRC/configure" \
-        --prefix=/usr \
-        --disable-static \
-        --enable-shared
-        
+    "$LIBUNI_SRC/configure" --prefix=/usr --disable-static --enable-shared
     make -j"$(nproc)"
-    
     make DESTDIR="$ROOTFS" install
     
     log "building libidn2 ${LIBIDN_VER}"
@@ -1555,52 +1377,39 @@ if should_run; then
     rm -rf libidn2
     mkdir libidn2
     cd libidn2
-    
-    "$LIBIDN_SRC/configure" \
-        --prefix=/usr \
-        --disable-static \
-        --enable-shared
+    "$LIBIDN_SRC/configure" --prefix=/usr --disable-static --enable-shared
     make -j"$(nproc)"
     make DESTDIR="$ROOTFS" install
-    rm -f "$ROOTFS/lib/libunistring.la"
-    rm -f "$ROOTFS/lib/libidn2.la"
+    rm -f "$ROOTFS/usr/lib/libunistring.la" "$ROOTFS/usr/lib/libidn2.la"
     
     log "building libpsl ${LIBPSL_VER}"
     cd "$TOOLCHAIN/build"
     rm -rf libpsl
     mkdir libpsl
     cd libpsl
-    "$LIBPSL_SRC/configure" \
-        --prefix=/usr \
-        --sysconfdir=/etc \
-        --disable-static \
-        --enable-shared
+    "$LIBPSL_SRC/configure" --prefix=/usr --sysconfdir=/etc --disable-static --enable-shared
     make -j"$(nproc)"
     make DESTDIR="$ROOTFS" install
-
+    
     log "building curl ${CURL_VER}..."
-
     cd "$TOOLCHAIN/build"
     rm -rf curl
     mkdir curl
     cd curl
 
     export PKG_CONFIG="$TOOLCHAIN/bin/${TARGET}-pkg-config"
-    export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
-    export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib64/pkgconfig:$ROOTFS/usr/lib/pkgconfig:$ROOTFS/usr/share/pkgconfig"
 
     "$CURL_SRC/configure" \
         --build="$BUILD" \
         --host="$TARGET" \
         --prefix=/usr \
         --libdir=/usr/lib64 \
+        --with-ca-path=/etc/ssl/certs/ \
         --with-openssl \
         --with-libpsl \
         --with-libidn2 \
         --enable-shared \
         --disable-static \
-        --disable-manual \
-        --disable-docs \
         --disable-ldap \
         --disable-ldaps \
         --disable-rtsp \
@@ -1622,19 +1431,12 @@ if should_run; then
     make DESTDIR="$ROOTFS" install
 
     unset PKG_CONFIG
-    unset PKG_CONFIG_SYSROOT_DIR
-    unset PKG_CONFIG_LIBDIR
     
     log "building glib ${GLIB_VER}..."
+    cd "$TOOLCHAIN/build"
+    rm -rf glib
 
-# ============================================================
-# target GLib — goes into Nixie rootfs
-# ============================================================
-
-cd "$TOOLCHAIN/build"
-rm -rf glib
-
-cat > "$TOOLCHAIN/build/glib-cross.txt" <<EOF2
+    cat > "$TOOLCHAIN/build/glib-cross.txt" <<EOF2
 [binaries]
 c = ['ccache', '${TARGET}-gcc']
 cpp = ['ccache', '${TARGET}-g++']
@@ -1653,73 +1455,44 @@ cpu = 'x86_64'
 endian = 'little'
 EOF2
 
-meson setup glib \
-    "$GLIB_SRC" \
-    --cross-file "$TOOLCHAIN/build/glib-cross.txt" \
-    --prefix=/usr \
-    --libdir=/usr/lib64 \
-    --buildtype=release \
-    -Dtests=false \
-    -Dsysprof=disabled \
-    -Dlibmount=enabled
-
-meson compile -C glib -j"$(nproc)"
-DESTDIR="$ROOTFS" meson install -C glib
-
-
-cd "$TOOLCHAIN/build"
-rm -rf glib-native
-
-(
-
-    # IMPORTANT: this build must use Ubuntu's native compiler,
-    # not the Nixie cross compiler.
-    unset CC
-    unset CXX
-    unset CPP
-    unset AR
-    unset AS
-    unset LD
-    unset NM
-    unset OBJCOPY
-    unset OBJDUMP
-    unset RANLIB
-    unset READELF
-    unset STRIP
-    unset PKG_CONFIG
-    unset PKG_CONFIG_SYSROOT_DIR
-    unset PKG_CONFIG_LIBDIR
-    unset PKG_CONFIG_PATH
-
-    export CC="/usr/bin/gcc"
-    export CXX="/usr/bin/g++"
-    export AR="/usr/bin/ar"
-    export AS="/usr/bin/as"
-    export LD="/usr/bin/ld"
-    export NM="/usr/bin/nm"
-    export OBJCOPY="/usr/bin/objcopy"
-    export OBJDUMP="/usr/bin/objdump"
-    export RANLIB="/usr/bin/ranlib"
-    export READELF="/usr/bin/readelf"
-    export STRIP="/usr/bin/strip"
-
-    meson setup "$TOOLCHAIN/build/glib-native" \
+    meson setup glib \
         "$GLIB_SRC" \
-        --prefix="$TOOLCHAIN/native" \
-        --libdir=lib \
+        --cross-file "$TOOLCHAIN/build/glib-cross.txt" \
+        --prefix=/usr \
+        --libdir=/usr/lib64 \
         --buildtype=release \
         -Dtests=false \
         -Dsysprof=disabled \
-        -Dlibmount=disabled \
-        -Dman-pages=disabled \
-        -Ddocumentation=false \
-        -Dlibelf=disabled
+        -Dlibmount=enabled \
+        -Dman-pages=enabled
 
-    meson compile -C "$TOOLCHAIN/build/glib-native" -j"$(nproc)"
-    meson install -C "$TOOLCHAIN/build/glib-native"
-)
+    meson compile -C glib -j"$(nproc)"
+    DESTDIR="$ROOTFS" meson install -C glib
+
+    cd "$TOOLCHAIN/build"
+    rm -rf glib-native
+
+    (
+        unset CC CXX CPP AR AS LD NM OBJCOPY OBJDUMP RANLIB READELF STRIP PKG_CONFIG PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_LIBDIR PKG_CONFIG_PATH
+        export CC="/usr/bin/gcc" CXX="/usr/bin/g++" AR="/usr/bin/ar" AS="/usr/bin/as" LD="/usr/bin/ld" NM="/usr/bin/nm" OBJCOPY="/usr/bin/objcopy" OBJDUMP="/usr/bin/objdump" RANLIB="/usr/bin/ranlib" READELF="/usr/bin/readelf" STRIP="/usr/bin/strip"
+
+        meson setup "$TOOLCHAIN/build/glib-native" \
+            "$GLIB_SRC" \
+            --prefix="$TOOLCHAIN/native" \
+            --libdir=lib \
+            --buildtype=release \
+            -Dtests=false \
+            -Dsysprof=disabled \
+            -Dlibmount=disabled \
+            -Dman-pages=disabled \
+            -Ddocumentation=false \
+            -Dlibelf=disabled
+
+        meson compile -C "$TOOLCHAIN/build/glib-native" -j"$(nproc)"
+        meson install -C "$TOOLCHAIN/build/glib-native"
+    )
+
     log "building readline ${READLINE_VER}..."
-
     cd "$TOOLCHAIN/build"
     rm -rf readline
     mkdir readline
@@ -1740,23 +1513,14 @@ rm -rf glib-native
     make SHLIB_LIBS="-ltinfo" -j"$(nproc)"
     make SHLIB_LIBS="-ltinfo" DESTDIR="$ROOTFS" install
 
-    unset CPPFLAGS
-    unset LDFLAGS
-    unset LIBS
+    unset CPPFLAGS LDFLAGS LIBS
 
-    # ============================================================
-    # slang
-    # ============================================================
-
-    
     log "building slang ${SLANG_VER}..."
-
     cd "$SLANG_SRC"
-
     make distclean >/dev/null 2>&1 || true
 
     ./configure \
-       --build="$BUILD" \
+        --build="$BUILD" \
         --host="$TARGET" \
         --prefix=/usr \
         --libdir=/usr/lib64 \
@@ -1765,12 +1529,7 @@ rm -rf glib-native
     make
     make DESTDIR="$ROOTFS" install
 
-    # ============================================================
-    # popt
-    # ============================================================
-
     log "building popt ${POPT_VER}..."
-
     cd "$TOOLCHAIN/build"
     rm -rf popt
     mkdir popt
@@ -1787,9 +1546,7 @@ rm -rf glib-native
     make DESTDIR="$ROOTFS" install
 
     log "building libnewt ${NEWT_VER}..."
-
     cd "$NEWT_SRC"
-
     make distclean >/dev/null 2>&1 || true
 
     ./configure \
@@ -1798,32 +1555,19 @@ rm -rf glib-native
         --prefix=/usr \
         --libdir=/usr/lib64
 
-    make -j"$(nproc)" \
-        CC="$CC" \
-        AR="$AR" \
-        RANLIB="$RANLIB"
-
+    make -j"$(nproc)" CC="$CC" AR="$AR" RANLIB="$RANLIB"
     make DESTDIR="$ROOTFS" install
-
 fi
 
-next_step;
-
+next_step
 
 # ============================================================
 # networkmanager itself
 # ============================================================
+
 if should_run; then
     export PATH="$TOOLCHAIN/native/bin:$ROOTFS/usr/bin:$PATH"
-
-    unset PKG_CONFIG
-    unset PKG_CONFIG_SYSROOT_DIR
-    unset PKG_CONFIG_LIBDIR
-    unset CPPFLAGS
-    unset LDFLAGS
-    unset LIBS
-
-    export PKG_CONFIG_PATH="$TOOLCHAIN/native/lib/pkgconfig"
+    unset PKG_CONFIG PKG_CONFIG_LIBDIR CPPFLAGS LDFLAGS LIBS
 
     log "building NetworkManager ${NETWORKMANAGER_VER}..."
     cd "$TOOLCHAIN/build"
@@ -1858,7 +1602,7 @@ if should_run; then
     DESTDIR="$ROOTFS" meson install -C networkmanager
 fi
 
-next_step;
+next_step
 
 # ============================================================
 # rootfs setup
@@ -1886,16 +1630,9 @@ if should_run; then
         "$ROOTFS/etc/tmpfiles.d"
 
     chmod 1777 "$ROOTFS/tmp"
-
-    # machine-id may be generated on first boot. An empty file is valid
-    # for the initial rootfs and keeps systemd from trying to mutate the
-    # build host's machine-id.
     : > "$ROOTFS/etc/machine-id"
-
-    # /var/run is the traditional spelling; systemd uses /run.
     ln -sfn /run "$ROOTFS/var/run"
 
-    # systemd as PID 1.
     if [ -x "$ROOTFS/usr/lib/systemd/systemd" ]; then
         ln -sfn /usr/lib/systemd/systemd "$ROOTFS/sbin/init"
     else
@@ -1903,32 +1640,20 @@ if should_run; then
         exit 1
     fi
 
-    # Do not forcibly replace existing /bin, /sbin, /lib or /lib64
-    # directories here.  A bootstrap rootfs may already contain real
-    # directories, and `ln -sfn` does not safely merge/replace them.
-    #
-    # systemd itself is installed under /usr, while the glibc bootstrap
-    # may place the dynamic loader under /lib64.
-    
-    # enable networkmanager in systemd
     mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
     ln -sfn /usr/lib/systemd/system/NetworkManager.service \
         "$ROOTFS/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
 
-    # ensure networkmanager manages all devices on live boot
     mkdir -p "$ROOTFS/etc/NetworkManager/conf.d"
     cat > "$ROOTFS/etc/NetworkManager/conf.d/10-globally-managed-devices.conf" <<'EOF'
 [keyfile]
 unmanaged-devices=none
 EOF
 
-    # link DNS to systemd-resolved
-    mkdir -p "$ROOTFS/etc/NetworkManager/conf.d"
     cat > "$ROOTFS/etc/NetworkManager/conf.d/dns.conf" <<'EOF'
 [main]
 dns=systemd-resolved
 EOF
-
 fi
 
 next_step
@@ -1942,22 +1667,19 @@ if should_run; then
 
     if [ -e "$ROOTFS/lib64/ld-linux-x86-64.so.2" ]; then
         log "glibc dynamic loader installed in /lib64."
-
     elif [ -e "$ROOTFS/lib/ld-linux-x86-64.so.2" ]; then
         log "glibc dynamic loader installed in /lib."
-
     elif [ -e "$ROOTFS/usr/lib64/ld-linux-x86-64.so.2" ]; then
         log "glibc dynamic loader installed in /usr/lib64."
-
     elif [ -e "$ROOTFS/usr/lib/ld-linux-x86-64.so.2" ]; then
         log "glibc dynamic loader installed in /usr/lib."
-
     else
         log_error "glibc dynamic loader was not found."
-        log_error "checked /lib64, /lib, /usr/lib64 and /usr/lib."
         exit 1
     fi
 fi
+
+next_step
 
 # ============================================================
 # sanity checks
@@ -2009,7 +1731,7 @@ NAME="Nixie Linux"
 PRETTY_NAME="Nixie Linux"
 ID=nixie
 ID_LIKE=linux
-VERSION_ID="rolling"
+VERSION_ID="v3.0"
 EOF
 
     log "installing certificates"
@@ -2027,7 +1749,7 @@ EOF
 [38;2;56;72;254m|[39m[38;2;53;76;254m [39m[38;2;50;80;253m|[39m[38;2;46;84;253m [39m[38;2;43;88;252m|[39m[38;2;40;92;251m [39m[38;2;37;96;250m|[39m[38;2;34;100;249m [39m[38;2;31;104;247m|[39m[38;2;29;108;246m>[39m[38;2;26;112;244m [39m[38;2;23;117;243m [39m[38;2;21;121;241m<[39m[38;2;19;125;239m|[39m[38;2;17;129;237m [39m[38;2;15;133;234m|[39m[38;2;13;138;232m [39m[38;2;11;142;230m [39m[38;2;9;146;227m_[39m[38;2;8;150;224m_[39m[38;2;7;154;222m/[39m[38;2;5;159;219m [39m[38;2;4;163;216m [39m[38;2;3;167;213m[39m
 [38;2;46;84;253m|[39m[38;2;43;88;252m_[39m[38;2;40;92;251m|[39m[38;2;37;96;250m [39m[38;2;34;100;249m|[39m[38;2;31;104;247m_[39m[38;2;29;108;246m|[39m[38;2;26;112;244m_[39m[38;2;23;117;243m/[39m[38;2;21;121;241m_[39m[38;2;19;125;239m/[39m[38;2;17;129;237m\[39m[38;2;15;133;234m_[39m[38;2;13;138;232m\[39m[38;2;11;142;230m_[39m[38;2;9;146;227m|[39m[38;2;8;150;224m\[39m[38;2;7;154;222m_[39m[38;2;5;159;219m_[39m[38;2;4;163;216m_[39m[38;2;3;167;213m|[39m[38;2;2;171;209m [39m[38;2;2;175;206m[39m
 ===============================================
-Welcome to nixie linux! (rolling)
+Welcome to nixie linux! (v3.0)
 EOF
 
     mkdir -p "$ROOTFS/etc/fastfetch"
@@ -2087,12 +1809,12 @@ EOF
 EOF
 
     cat > "$ROOTFS/etc/issue" <<'EOF'
-Nixie Linux \r (\l)
+Nixie Linux v3.0
 EOF
 
     cat > "$ROOTFS/etc/profile" <<'EOF'
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
-export PS1='\[\e[95m\]\u\[\e[0m\]@\[\e[36;1m\]\h\[\e[0m\]:\[\e[35;1m\]\w\[\e[0m\]\$ '
+export PS1='(\[\e[95m\]\u\[\e[0m\]@\[\e[36;1m\]\h\[\e[0m\]:\[\e[35;1m\]\w\[\e[0m\]) \$ '
 # ls / dircolors
 if command -v dircolors >/dev/null 2>&1; then
     eval "$(dircolors -b)"
@@ -2178,6 +1900,7 @@ ExecStart=
 ExecStart=-/usr/sbin/agetty --autologin root --noclear %I $TERM
 EOF
     
+
     cat > "$ROOTFS/etc/login.defs" <<'EOF'
 FAIL_DELAY 3
 LOG_UNKFAIL_ENAB no
@@ -2192,9 +1915,8 @@ ENV_PATH    PATH=/usr/local/bin:/usr/bin:/bin
 TTYPERM 0600
 EOF
     log "good boy"
-    # chroot does not start a login shell, so /etc/profile is not sourced
-    # automatically. For an interactive shell, use: chroot "$ROOTFS" /bin/bash -il
 fi
+
 next_step
 
 # ============================================================
@@ -2204,48 +1926,21 @@ next_step
 if should_run; then
     log "building post-sanity base packages..."
 
-    build_autotools_package "xz" "$XZ_SRC" \
-        --disable-doc \
-        --disable-scripts
+    log "copying fastfetch..."
+    cp -a "$FASTFETCH_SRC"/* "$ROOTFS/"
     
-    cp -r "$FASTFETCH_SRC"/* "$ROOTFS/"
+    log "copying nxbuild..."
+    cp "$SOURCES/nxbuild" "$ROOTFS/"
+    chmod +x "$ROOTFS/nxbuild"
+
+    build_autotools_package "xz" "$XZ_SRC" --disable-scripts
     
-    log "building kmod..."
-
-    cd "$TOOLCHAIN/build"
-
-    rm -rf kmod
-    mkdir kmod
-    cd kmod
-
-    "$KMOD_SRC/configure" \
-        --build="$BUILD" \
-        --host="$TARGET" \
-        --prefix=/usr \
-        --sysconfdir=/etc \
-        --libdir=/usr/lib \
-        --with-xz=yes \
-        --with-zstd=no \
-        --with-zlib=no \
-        --with-openssl=yes
-
-    make -j"$(nproc)"
-    make DESTDIR="$ROOTFS" install
-    
-    
-    mkdir -p "$ROOTFS/etc/systemd/system/sysinit.target.wants"
-
-ln -sf \
-    /usr/lib/systemd/system/systemd-modules-load.service \
-    "$ROOTFS/etc/systemd/system/sysinit.target.wants/systemd-modules-load.service"
     
     log "building htop..."
     cd "$HTOP_SRC"
-
     ./autogen.sh
 
-    export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
-    export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib64/pkgconfig:$ROOTFS/usr/lib/pkgconfig:$ROOTFS/usr/share/pkgconfig"
+    export PKG_CONFIG="$TOOLCHAIN/bin/${TARGET}-pkg-config"
 
     ./configure \
         --build="$(gcc -dumpmachine)" \
@@ -2262,124 +1957,232 @@ ln -sf \
     
     log "building procps-ng..."
     cd "$PROCPS_SRC"
-    export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
-    export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib/pkgconfig:$ROOTFS/usr/share/pkgconfig"
     export CPPFLAGS="-I$ROOTFS/usr/include"
-    export LDFLAGS="-L$ROOTFS/usr/lib"
+    export LDFLAGS="-L$ROOTFS/usr/lib64"
     make distclean 2>/dev/null || true
 
     ./autogen.sh
-
     ./configure \
         --build="$(gcc -dumpmachine)" \
         --host=x86_64-nixie-linux-gnu \
         --prefix=/usr \
         --libdir=/usr/lib64 \
         --sysconfdir=/etc \
-        --disable-nls \
-        PKG_CONFIG_SYSROOT_DIR="$ROOTFS" \
-        PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib64/pkgconfig:$ROOTFS/usr/lib/pkgconfig:$ROOTFS/usr/share/pkgconfig"
+        --disable-nls
 
     make -j"$(nproc)"
     make DESTDIR="$ROOTFS" install
     
     log "building nano..."
-    
     cd "$NANO_SRC"
-
     ./autogen.sh
-    
     ./configure \
         --prefix=/usr \
         --host=x86_64-nixie-linux-gnu \
-        --build="$(gcc -dumpmachine)" \ 
+        --build="$(gcc -dumpmachine)" \
         LIBS="-ltinfo"
     make clean
     make -j"$(nproc)" LIBS="-lncursesw -ltinfo"
     make DESTDIR="$ROOTFS" install
 
-    build_autotools_package "less" "$LESS_SRC" \
-        --with-regex=posix
+    unset PKG_CONFIG CPPFLAGS LDFLAGS
 
+    build_autotools_package "less" "$LESS_SRC" --with-regex=posix
     build_autotools_package "which" "$WHICH_SRC"
-
-    #build_autotools_package "file" "$FILE_SRC" \
-    #    --disable-zlib \
-    #    --disable-bzlib
-
-    build_autotools_package "grep" "$GREP_SRC" \
-        --without-included-regex
-
+    build_autotools_package "grep" "$GREP_SRC" --without-included-regex
     build_autotools_package "sed" "$SED_SRC"
-
-    build_autotools_package "gawk" "$GAWK_SRC" \
-        --without-mpfr
-        
+    build_autotools_package "gawk" "$GAWK_SRC" --without-mpfr
     build_autotools_package "gzip" "$GZIP_SRC"
-
     build_autotools_package "tar" "$TAR_SRC"
+    build_autotools_package "findutils" "$FINDUTILS_SRC" --disable-locate
+fi
 
-    build_autotools_package "findutils" "$FINDUTILS_SRC" \
-        --disable-locate
-        
+next_step
+
+# ============================================================
+# native gcc & binutils into rootfs
+# ============================================================
+
+if should_run; then
+
+    log "building native binutils for rootfs..."
+    cd "$TOOLCHAIN/build"
+    rm -rf binutils-target
+    mkdir binutils-target
+    cd binutils-target
+
+    "$TOOLCHAIN/src/binutils-${BINUTILS_VER}/configure" \
+        --build="$BUILD" \
+        --host="$TARGET" \
+        --target="$TARGET" \
+        --prefix=/usr \
+        --libdir=/usr/lib64 \
+        --disable-nls \
+        --disable-werror \
+        --disable-multilib \
+        --enable-shared
+
+    make -j"$(nproc)"
+    make DESTDIR="$ROOTFS" install
+
+    log "building native gcc into rootfs..."
+    cd "$TOOLCHAIN/build"
+    rm -rf gcc-target
+    mkdir gcc-target
+    cd gcc-target
+
+    "$TOOLCHAIN/src/gcc-${GCC_VER}/configure" \
+        --build="$BUILD" \
+        --host="$TARGET" \
+        --target="$TARGET" \
+        --prefix=/usr \
+        --libdir=/usr/lib64 \
+        --with-sysroot=/ \
+        --enable-languages=c,c++ \
+        --enable-shared \
+        --enable-threads=posix \
+        --enable-default-pie \
+        --enable-default-ssp \
+        --disable-multilib \
+        --disable-nls
+
+    make -j"$(nproc)"
+    make DESTDIR="$ROOTFS" install
+
+    ln -sfn gcc "$ROOTFS/usr/bin/cc"
+    ln -sfn g++ "$ROOTFS/usr/bin/c++"
 
 fi
 
 next_step
 
+# ============================================================
+# build tools & man doc packages into rootfs
+# ============================================================
 
+if should_run; then
+    
+
+    log "building development & build tools into rootfs..."
+
+    CFLAGS="-std=gnu11" build_autotools_package "m4" "$TOOLCHAIN/src/m4-${M4_VER}"
+    build_autotools_package "autoconf" "$TOOLCHAIN/src/autoconf-${AUTOCONF_VER}"
+    build_autotools_package "automake" "$TOOLCHAIN/src/automake-${AUTOMAKE_VER}"
+    build_autotools_package "libtool" "$TOOLCHAIN/src/libtool-${LIBTOOL_VER}" --libdir=/usr/lib64
+    build_autotools_package "make" "$TOOLCHAIN/src/make-${MAKE_VER}"
+    build_autotools_package "bison" "$TOOLCHAIN/src/bison-${BISON_VER}"
+    build_autotools_package "flex" "$TOOLCHAIN/src/flex-${FLEX_VER}" --libdir=/usr/lib64 
+    ln -sfn flex "$ROOTFS/usr/bin/lex"
+    tar -xf "$SOURCES/pkg-config-${PKGCONFIG_VER}.tar.gz" \
+    -C "$TOOLCHAIN/src/" \
+    "pkg-config-${PKGCONFIG_VER}/glib/glib/goption.c"
+    CFLAGS="-O2 -pipe -std=gnu11" \
+    glib_cv_stack_grows=no \
+    glib_cv_uscore=no \
+    glib_cv_posix_getpwuid_r=yes \
+    ac_cv_func_posix_getpwuid_r=yes \
+    glib_cv_posix_getgrgid_r=yes \
+    ac_cv_func_posix_getgrgid_r=yes \
+    glib_cv_sane_realloc=yes \
+    glib_cv_va_val_copy=yes \
+    glib_cv_long_long_format=ll \
+    build_autotools_package "pkg-config" "$TOOLCHAIN/src/pkg-config-${PKGCONFIG_VER}" --with-internal-glib 
+
+
+cat << "EOF" > texinfo.cache
+gl_cv_func_iconv_works=yes
+am_cv_func_iconv_works=yes
+ac_cv_func_iconv_works=yes
+am_cv_func_iconv_supports_utf8=yes
+gl_cv_func_iconv_supports_utf8=yes
+gl_cv_func_wcrtomb_retval=yes
+gl_cv_func_mbrtowc_retval=yes
+EOF
+
+    am_cv_func_iconv_works=yes \
+    gl_cv_func_iconv_works=yes \
+    am_cv_func_iconv=yes
+    build_autotools_package "texinfo" "$TOOLCHAIN/src/texinfo-${TEXINFO_VER}" texinfo_cv_sys_iconv_converts_euc_cn="xyes"
+    
+    build_autotools_package "gdbm" \
+    "$TOOLCHAIN/src/gdbm-${GDBM_VER}" \
+    --enable-libgdbm-compat
+
+    log "building perl ${PERL_VER} in chroot..."
+    
+    sh -c "rm -rf '$ROOTFS/perl-${PERL_VER}'"
+    cp -r "$TOOLCHAIN/src/perl-${PERL_VER}" "$ROOTFS/"
+    mount --bind /dev "$ROOTFS/dev"
+    chroot "$ROOTFS" /bin/bash -c "
+    # Inside chroot:
+mkdir -p /usr/include/x86_64-linux-gnu
+cd /usr/include
+for d in asm asm-generic bits gnu linux sys; do
+    [ -e '\$d' ] && ln -sfn '../'\$d 'x86_64-linux-gnu/'\$d
+done
+    cd /perl-${PERL_VER}
+    rm -f config.sh Policy.sh
+    ./Configure -des \
+        -Dprefix=/usr \
+        -Dman1dir=/usr/share/man/man1 \
+        -Dman3dir=/usr/share/man/man3 \
+        -Dusethreads \
+        -Dlibs='-lpthread -ldl -lm -lcrypt -lutil -lc'
+    make -j$(nproc)
+    make install
+    ldconfig
+    rm -rf /perl-${PERL_VER}
+"
+    umount "$ROOTFS/dev"
+
+    log "building ninja ${NINJA_VER}..."
+    cd "$TOOLCHAIN/src/ninja-${NINJA_VER}"
+    python3 configure.py --bootstrap
+    install -vm755 ninja "$ROOTFS/usr/bin/ninja"
+
+    log "installing meson ${MESON_VER}..."
+    cd "$TOOLCHAIN/src/meson-${MESON_VER}"
+    python3 setup.py install --prefix=/usr --root="$ROOTFS"
+
+    log "installing man pages & man-db..."
+    cd "$TOOLCHAIN/src/man-pages-${MAN_PAGES_VER}"
+    make DESTDIR="$ROOTFS" install
+
+    build_autotools_package "libpipeline" "$TOOLCHAIN/src/libpipeline-${LIBPIPELINE_VER}" --libdir=/usr/lib64
+    build_autotools_package "groff" "$TOOLCHAIN/src/groff-${GROFF_VER}" PAGE=A4
+    build_autotools_package "man-db" "$TOOLCHAIN/src/man-db-${MAN_DB_VER}" \
+        --libdir=/usr/lib64 \
+        --sysconfdir=/etc \
+        --disable-setuid \
+        --enable-cache-owner=root \
+        --with-browser=/usr/bin/less \
+        --with-vpath
+fi
+
+next_step
 
 # ============================================================
 # cleanup environment
 # ============================================================
 
-unset CC
-unset CXX
-unset AR
-unset AS
-unset LD
-unset NM
-unset OBJCOPY
-unset OBJDUMP
-unset RANLIB
-unset READELF
-unset STRIP
-unset CFLAGS
-unset CXXFLAGS
-unset PKG_CONFIG
-unset PKG_CONFIG_PATH
-unset PKG_CONFIG_LIBDIR
-unset PKG_CONFIG_SYSROOT_DIR
+unset CC CXX AR AS LD NM OBJCOPY OBJDUMP RANLIB READELF STRIP CFLAGS CXXFLAGS PKG_CONFIG PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
 
 log "Fixing permissions..."
 username="${SUDO_USER:-$USER}"
-log "chown -R "$username:$username" $ROOTFS"
-sudo chown -R "$username:$username" $ROOTFS
-log "chown -R "$username:$username" $TOOLCHAIN"
-sudo chown -R "$username:$username" $TOOLCHAIN
-log "chown -R "$username:$username" $SOURCES"
-sudo chown -R "$username:$username" $SOURCES
+log "chown -R $username:$username $ROOTFS"
+sudo chown -R "$username:$username" "$ROOTFS"
+log "chown -R $username:$username $TOOLCHAIN"
+sudo chown -R "$username:$username" "$TOOLCHAIN"
+log "chown -R $username:$username $SOURCES"
+sudo chown -R "$username:$username" "$SOURCES"
 
 log "Running ldconfig..."
 ldconfig -r "$ROOTFS"
 cp "$ROOTFS/sbin/ldconfig" "$ROOTFS/usr/sbin/ldconfig" 
 
-log "Running depmod..."
-"$ROOTFS/usr/sbin/depmod" \
-    -b "$ROOTFS" \
-    "$LINUX_VER"
+
 
 echo
-printf '%b=======================%b\n' \
-    "$LOG_PREFIX_COLOR" \
-    "$RESET"
-
-printf '%b  bootstrap complete!%b\n' \
-    "$LOG_TEXT_COLOR" \
-    "$RESET"
-
-printf '%b=======================%b\n' \
-    "$LOG_PREFIX_COLOR" \
-    "$RESET"
-    
-# golly this was a pain in the
+printf '%b=======================%b\n' "$LOG_PREFIX_COLOR" "$RESET"
+printf '%b  bootstrap complete!%b\n' "$LOG_TEXT_COLOR" "$RESET"
+printf '%b=======================%b\n' "$LOG_PREFIX_COLOR" "$RESET"

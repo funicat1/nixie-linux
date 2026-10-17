@@ -74,7 +74,6 @@ if [ -z "$linux_src" ]; then
     exit 1
 fi
 
-
 # clean iso staging area
 rm -rf "$sysroot/build/iso"
 
@@ -117,6 +116,12 @@ fi
 log "installing kernel modules"
 cd "$linux_src"
 make O="$sysroot/build/linux" modules_install INSTALL_MOD_PATH="$sysroot/rootfs/"
+
+log "Running depmod..."
+"$ROOTFS/usr/sbin/depmod" \
+    -b "$sysroot/rootfs" \
+    "7.2.3"
+
 
 # ==============
 # limine
@@ -176,7 +181,10 @@ mkdir -p "$sysroot/build/iso/live"
 mksquashfs \
     "$sysroot/rootfs/" \
     "$sysroot/build/iso/live/live.sqsh" \
-    -all-root
+    -all-root \
+    -comp zstd \
+    -b 1048576 \
+    -Xcompression-level 22
 
 # ==============
 # busybox
@@ -384,7 +392,7 @@ cd "$sysroot"
 log "writing limine configuration"
 
 cat > "$sysroot/build/iso/boot/limine.conf" <<'EOF'
-timeout: 30
+timeout: 5
 interface_resolution: 640x480
 interface_branding: nixie linux
 interface_branding_colour: aa88ff

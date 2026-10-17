@@ -6,3 +6,4 @@ nixie-rootfs.img
 .ccache
 nixie-linux.iso
 linux-config.old
+nixie.log
