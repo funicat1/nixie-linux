@@ -1931,7 +1931,7 @@ if should_run; then
     
     log "copying nxbuild..."
     cp "$SOURCES/nxbuild" "$ROOTFS/usr/bin"
-    chmod +x "$ROOTFS/nxbuild"
+    chmod +x "$ROOTFS/usr/bin/nxbuild"
 
     build_autotools_package "xz" "$XZ_SRC" --disable-scripts
     
